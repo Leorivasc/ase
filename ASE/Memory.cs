@@ -366,10 +366,12 @@ namespace ASE
 
         public Memory()
         {
-            if (File.Exists(ConfigOptions.RunninConfig.TOSPath))
+            string tosPath = ResolveFilePath(ConfigOptions.RunninConfig.TOSPath);
+
+            if (File.Exists(tosPath))
             {
-                ROM = File.ReadAllBytes(ConfigOptions.RunninConfig.TOSPath);
-                ColoredConsole.WriteLine($"TOS loaded from [[green]]{ConfigOptions.RunninConfig.TOSPath}[[/green]], size: [[yellow]]{ROM.Length}[[/yellow]] bytes.", ConfigOptions.DebugModes.Quiet);
+                ROM = File.ReadAllBytes(tosPath);
+                ColoredConsole.WriteLine($"TOS loaded from [[green]]{tosPath}[[/green]], size: [[yellow]]{ROM.Length}[[/yellow]] bytes.", ConfigOptions.DebugModes.Quiet);
             }
             else
             {
@@ -1239,7 +1241,7 @@ namespace ASE
                     return;
                 }
 
-                // Chip de sonido YM2149.
+                // YM2149 sound chip.
                 //
                 // The PSG decodes exactly two address lines inside its block: A1 chooses the
                 // register-select half ($FF8800) from the data half ($FF8802), and A0 selects a
@@ -1492,7 +1494,7 @@ namespace ASE
                             ASEMain._mfp.TACR = v;
                             int newMode = v & 0x0F;
 
-                            // Si cambia modo/prescaler, resetea fase del prescaler
+                            // A change of mode/prescaler resets the prescaler phase
                             if (oldMode != newMode)
                                 ASEMain._mfp.timerAPredivAcc = 0;
 

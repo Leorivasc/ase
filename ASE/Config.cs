@@ -47,6 +47,17 @@ namespace ASE
                 None, Fire, Space, Up, Y, N, T
             }
 
+            /// <summary>
+            /// What is plugged into one of the IKBD's two ports: nothing, the host mouse, or a
+            /// joystick driven by the keyboard joystick, the gamepad or both. The order is the
+            /// one of the Input tab's combos. Only port 0 can take the mouse: the IKBD decodes
+            /// a mouse there and nowhere else, so on port 1 it reads as an empty port.
+            /// </summary>
+            public enum PortDevices
+            {
+                Disconnected, Mouse, KeysAndGamepad, KeysOnly, GamepadOnly
+            }
+
             public enum MIDIEmulationOptions
             {
                 None, System, BuiltInMT32
@@ -118,11 +129,11 @@ namespace ASE
             /// </summary>
             public static ConfigOptions RunninConfig = new ConfigOptions();
 
-            public string TOSPath { get; set; } = "tos.rom";
+            public string TOSPath { get; set; } = "emutos.rom";
 
             // Hardware flags
-            public STModels STModel { get; set; } = STModels.ST;
-            public RAMConfigurations RAMConfiguration { get; set; } = RAMConfigurations.RAM_1MB;
+            public STModels STModel { get; set; } = STModels.STE;
+            public RAMConfigurations RAMConfiguration { get; set; } = RAMConfigurations.RAM_2MB;
             public  bool MaxSpeed { get; set; } = false;
             public string FloppyImagePath { get; set; } = "";
 
@@ -339,6 +350,14 @@ namespace ASE
             public float Bloom { get; set; } = 0.22f;
             public float Mask { get; set; } = 0.50f;
             public float Noise { get; set; } = 0.05f;
+
+            // What is plugged into the IKBD's ports (see PortDevices). Port 0 is the mouse port,
+            // and a joystick there is joystick 0; port 1 is joystick 1. Applied live, like
+            // plugging a controller into a running ST.
+            [JsonConverter(typeof(EnumNameJsonConverter<PortDevices>))]
+            public PortDevices Port0Device { get; set; } = PortDevices.Mouse;
+            [JsonConverter(typeof(EnumNameJsonConverter<PortDevices>))]
+            public PortDevices Port1Device { get; set; } = PortDevices.KeysAndGamepad;
 
             // Joystick emulation
             public SDL_Scancode KeyJoy1Up { get; set; } = SDL_Scancode.SDL_SCANCODE_KP_8;
@@ -625,6 +644,28 @@ namespace ASE
                             ColoredConsole.WriteLine($"Using default sensitivity [[cyan]]{ConfigOptions.RunninConfig.MouseSensitivity}[[/cyan]].");
                         }
                         break;
+                    case "--port0":
+                    case "--port1":
+                        {
+                            bool port1 = parts[0].Equals("--port1", StringComparison.OrdinalIgnoreCase);
+                            if (parts.Length > 1 && TryParseOption(parts[1], out ConfigOptions.PortDevices _pd,
+                                    ("none", ConfigOptions.PortDevices.Disconnected), ("off", ConfigOptions.PortDevices.Disconnected),
+                                    ("joystick", ConfigOptions.PortDevices.KeysAndGamepad),
+                                    ("keys", ConfigOptions.PortDevices.KeysOnly), ("keyboard", ConfigOptions.PortDevices.KeysOnly),
+                                    ("gamepad", ConfigOptions.PortDevices.GamepadOnly), ("pad", ConfigOptions.PortDevices.GamepadOnly))
+                                && !(port1 && _pd == ConfigOptions.PortDevices.Mouse))
+                            {
+                                if (port1) ConfigOptions.RunninConfig.Port1Device = _pd;
+                                else ConfigOptions.RunninConfig.Port0Device = _pd;
+                            }
+                            else
+                            {
+                                ColoredConsole.WriteLine($"Invalid device [[red]]{(parts.Length > 1 ? parts[1] : "")}[[/red]] for {parts[0]}. " +
+                                    (port1 ? "Use joystick|keys|gamepad|disconnected (the mouse only works on port 0)."
+                                           : "Use mouse|joystick|keys|gamepad|disconnected."));
+                            }
+                        }
+                        break;
                     case "--cycleexact":
                         ConfigOptions.RunninConfig.CycleExactBus =
                             parts.Length < 2 || !bool.TryParse(parts[1], out bool _ce) || _ce;
@@ -906,6 +947,8 @@ namespace ASE
             HelpOption("--persistence", "=N", "Phosphor persistence: share of the previous frame blended in, 0-50 percent");
             HelpOption("--anti-aliasing", "=<mode>", "Anti-aliasing of lines and polygon edges: none, fxaa or smaa. Also --aa");
             HelpOption("--mouse-sensitivity", "=N", $"Mouse movement divisor: higher is slower (default: {def.MouseSensitivity})");
+            HelpOption("--port0", "=<device>", "Mouse port: mouse, joystick (keys and gamepad), keys, gamepad or none (default: mouse)");
+            HelpOption("--port1", "=<device>", "Joystick port: joystick (keys and gamepad), keys, gamepad or none (default: joystick)");
 
             HelpSection("MIDI");
             HelpOption("--midi", "=<mode>", "MIDI emulation: none|system|mt32");
@@ -976,6 +1019,20 @@ namespace ASE
             => !string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir)
                 ? dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar
                 : "";
+
+        /// <summary>Where a file path from the configuration really points. A relative path is
+        /// looked up in the working directory first, as it always was, and then next to the
+        /// executable: the bundled EmuTOS is configured as a plain "emutos.rom", and a macOS app
+        /// started from Finder runs with "/" as its working directory, so the file sitting beside
+        /// the binary would never be found. Returns the path unchanged when neither exists.</summary>
+        public static string ResolveFilePath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || Path.IsPathRooted(path) || File.Exists(path))
+                return path;
+
+            string besideExecutable = Path.Combine(AppContext.BaseDirectory, path);
+            return File.Exists(besideExecutable) ? besideExecutable : path;
+        }
 
         public void LoadJsonConfig(string ConfigFile = "")
         {

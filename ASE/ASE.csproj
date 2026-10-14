@@ -45,7 +45,7 @@
 
 	<PropertyGroup>
 		<Major>1</Major>
-		<Minor>12</Minor>
+		<Minor>13</Minor>
 	</PropertyGroup>
 
 	<PropertyGroup>
@@ -84,17 +84,17 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Avalonia" Version="12.1.2" />
-		<PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
-		<PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
-		<PackageReference Include="ReactiveUI.Avalonia" Version="12.1.2" />
+		<PackageReference Include="Avalonia" Version="12.1.4" />
+		<PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+		<PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+		<PackageReference Include="ReactiveUI.Avalonia" Version="12.1.6" />
 		<PackageReference Include="LibVLCSharp" Version="3.10.1" />
 		<PackageReference Include="sdl2" Version="2.0.5" />
 		<PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
 		<PackageReference Include="Svg.Controls.Skia.Avalonia" Version="12.0.0.17" />
 		<PackageReference Include="TinyDialogsNet" Version="2.0.0" />
 		<!-- libvlc binaries for game video previews; on macOS/Linux VLC must be installed system-wide -->
-		<PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" Condition="'$(OS)' == 'Windows_NT'" />
+		<PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.24" Condition="'$(OS)' == 'Windows_NT'" />
   </ItemGroup>
 
 	<ItemGroup>
@@ -104,11 +104,11 @@
 	</ItemGroup>
 
 	<!--
-		Selección de librería nativa por RID. Las nativas viven en native/<rid>/
-		(ver native/README.md). Se copia SOLO la del RID con el que se compila:
+		Native library selection by RID. The natives live in native/<rid>/
+		(see native/README.md). ONLY the RID being built is copied:
 		- publish -r <rid>  → RuntimeIdentifier
-		- build/run sin -r  → RID del equipo (NETCoreSdkPortableRuntimeIdentifier)
-		El RID se normaliza a so+arquitectura para tolerar variantes
+		- build/run without -r  → this machine's RID (NETCoreSdkPortableRuntimeIdentifier)
+		The RID is normalised to os+architecture to tolerate variants
 		(win10-x64, linux-musl-arm64, ..).
 	-->
 	<PropertyGroup>
@@ -139,7 +139,39 @@
 		<VlcWindowsArm64Enabled>$([System.String]::Copy('$(AseNativeArch)').Equals('arm64'))</VlcWindowsArm64Enabled>
 	</PropertyGroup>
 
+	<!--
+		Single-file publishing: every file the project copies (the natives below, libVLC's
+		DLLs and plugins, the JSON catalogues, the ROM) goes NEXT TO the executable, never into
+		the bundle. SDK 10 got there on its own: whatever the bundler refused as native code
+		was copied beside the exe. SDK 11 (11.0.100-rc.2) treats any .dll nobody marked as
+		an assembly to bundle, the bundler still refuses it, and the file ends up in neither
+		place: moira.dll, SDL2.dll, mt32emu-2.dll and 323 libVLC files vanished from the
+		publish folder with only a NETSDK1236 warning naming them. Marking every None/Content
+		item excluded says it explicitly. Nothing changes on SDK 10, since no packaging
+		script sets IncludeNativeLibrariesForSelfExtract or IncludeAllContentForSelfExtract.
+		An item definition also reaches the Content items libVLC's .targets creates inside
+		a target of its own.
+	-->
+	<ItemDefinitionGroup>
+		<None>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</None>
+		<Content>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+	</ItemDefinitionGroup>
+
 	<ItemGroup>
+		<!-- EmuTOS (GPL) travels with its notice and licence text, which say where its source is. -->
+		<None Update="emutos.rom">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+		<None Update="emutos.txt">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+		<None Update="emutos-license.txt">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
 		<None Update="GameMenus.json">
 		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
@@ -180,7 +212,7 @@
 			<Link>moira.so</Link>
 		</None>
 
-		<!-- SDL2: solo Windows y macOS; en Linux se usa el de la distribución -->
+		<!-- SDL2: Windows and macOS only; on Linux the distribution's is used -->
 		<None Update="native/$(AseNativeRid)/SDL2.dll" Condition="'$(AseNativeOs)' == 'win'">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Link>SDL2.dll</Link>
@@ -205,6 +237,9 @@
 		<None Update="native/$(AseNativeRid)/libtinyfiledialogs.so" Condition="'$(AseNativeOs)' == 'linux' and '$(AseNativeArch)' == 'arm64'">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Link>libtinyfiledialogs.so</Link>
+		</None>
+		<None Update="PPAdaptedGames.json">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
 		
 	</ItemGroup>

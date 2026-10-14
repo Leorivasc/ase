@@ -64,7 +64,7 @@ namespace ASE
         // meant a timer that came due early in the chunk was not delivered until the end of it;
         // code that busy-waits on the 200 Hz Timer C ($114) or polls a timer data register
         // could miss the transition entirely and hang. Configurable via Config.CpuSyncSliceCycles
-        // (default 64 ≈ a couple of instructions); clamped to a sane range so a bad config value
+        // (default 4 a couple of instructions); clamped to a sane range so a bad config value
         // can never stall or degenerate the loop.
         static int CpuSliceCycles
         {
@@ -105,8 +105,8 @@ namespace ASE
         /// seen when the machine resumes instead of the window expiring in dead time.</summary>
         public static long VblCount => Volatile.Read(ref _vblCount);
 
-        // Hard disk activity light. Unlike the floppy — whose commands are rare enough that the
-        // FDC can post UI work for each one — a hard disk can serve thousands of accesses per
+        // Hard disk activity light. Unlike the floppy, whose commands are rare enough that the
+        // FDC can post UI work for each one, a hard disk can serve thousands of accesses per
         // second (a program reading a file in a loop), so the emulation side only stamps the
         // current VBL here and MainWindow.RefreshDriveLed reads it once per frame. Measured in
         // VBLs rather than wall clock so the light freezes with a paused machine.
@@ -240,8 +240,11 @@ namespace ASE
             }
 
             // Init runs on the UI thread (MainWindow.OnOpened), the SDL video thread.
+            // On macOS never inside a Cocoa tracking loop (close button, resize, window drag):
+            // SDL's pump would steal the events that loop waits for — see MacRunLoop.
+            bool isMac = OperatingSystem.IsMacOS();
             _sdlPumpTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(4), DispatcherPriority.Input,
-                                                (_, _) => SDL_PumpEvents());
+                                                (_, _) => { if (!isMac || MacRunLoop.InDefaultMode()) SDL_PumpEvents(); });
             _sdlPumpTimer.Start();
 
             // Boot from a snapshot if requested on the command line (--snapshot=<path>);
@@ -701,6 +704,10 @@ namespace ASE
         /// </summary>
         static void DrainSdlEvents()
         {
+            // What sits in each joystick port can change from the Configuration window at any
+            // time; picked up here, on this thread, before the events that depend on it.
+            HostInput.ApplyPortConfiguration();
+
             while (true)
             {
                 int n = SDL_PeepEvents(_drainBuffer, MaxEventsPerDrain, SDL_eventaction.SDL_GETEVENT,
@@ -886,8 +893,12 @@ namespace ASE
 
             // Hard disks attach at power-on, like the real hardware: the ACSI image first
             // (its partition count decides the GEMDOS drive's letter), then the host folder.
+            // A hard-disk game from the library replaces both with its own disk, and which
+            // game that is gets fixed here, for this whole power-on.
+            HardDiskGames.PowerOn();
             Acsi.Initialize();
             GemdosHD.Initialize();
+            HardDiskGames.DeleteRetiredImages();
 
             // What the MIDI ACIA's DIN sockets are plugged into is decided at power-on,
             // so a reset is also what applies a MIDI configuration change (and what
@@ -965,14 +976,21 @@ namespace ASE
 
             try
             {
+                // A library hard-disk game comes back with the disk it had: it has to be the
+                // session before the power-on attaches the disks. A snapshot without one is a
+                // machine with its own disks, and ends any game session.
+                HardDiskGames.LoadState(snap.Sections.GetValueOrDefault("HDG "));
+
                 bool ok = TurnOn(() => Snapshot.Apply(snap));
                 MainWindow?.RefreshAspectRatio();   // the snapshot may have a different monitor type
                 return ok;
             }
             catch (Exception ex)
             {
-                // Half-applied state: fall back to a clean boot with the previous config
+                // Half-applied state: fall back to a clean boot with the previous config, and
+                // the machine's own disks
                 error = ex.Message;
+                HardDiskGames.End();
                 ConfigOptions.RunninConfig.STModel = prevModel;
                 ConfigOptions.RunninConfig.RAMConfiguration = prevRam;
                 ConfigOptions.RunninConfig.MonochromeMonitor = prevMono;
@@ -1060,6 +1078,7 @@ namespace ASE
             // closing any host MIDI ports) cannot race a render.
             MidiManager.Shutdown();
             Acsi.Shutdown();    // the emulation thread is joined: no command can be in flight
+            HardDiskGames.Shutdown();   // its temporary images, now that nothing holds them open
             if (GamepadController != nint.Zero)
             {
                 SDL.SDL_GameControllerClose(GamepadController);
@@ -1173,8 +1192,10 @@ namespace ASE
                 }
             }
 
-            // First, check the host keyboard that emulates the joystick
-            if ((e.type == SDL_EventType.SDL_KEYDOWN && e.key.repeat == 0) || e.type == SDL_EventType.SDL_KEYUP)
+            // First, check the host keyboard that emulates the joystick. Only while a port takes
+            // it: with none, those keys reach the ST as the ordinary keys they are.
+            if (HostInput.KeyboardDrivesJoystick &&
+                ((e.type == SDL_EventType.SDL_KEYDOWN && e.key.repeat == 0) || e.type == SDL_EventType.SDL_KEYUP))
             {
                 bool pressed = (e.type == SDL_EventType.SDL_KEYDOWN);
                 bool isJoyKey = true;

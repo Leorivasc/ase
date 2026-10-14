@@ -33,8 +33,13 @@
  *           into the synthetic cartridge, so the chained TOS vector (and act_pd)
  *           must travel too. Host-side file handles and directory scans do NOT
  *           survive a restore — like unplugging and replugging the drive.
+ *   "HDG "  Only while a library hard-disk game runs: its title and source, and its
+ *           whole disk, compressed. The image is temporary and the saved RAM points
+ *           into it, so the snapshot is what keeps the game (HardDiskGames). Read by
+ *           ASEMain.StartWithSnapshot before the power-on, not by Apply.
  *
- * Not included: the floppy image contents themselves (only their paths) and
+ * Not included: the floppy image contents themselves (only their paths), the
+ * configured ACSI image (the user's own disk, attached from the settings), and
  * Moira-internal state not exposed by the wrapper (e.g. a pending STOP).
  *
  * Official repository 👉 https://github.com/thebitculture/ase
@@ -174,6 +179,11 @@ namespace ASE
             WriteSection(fs, "BLIT", Blitter.SaveState);
             WriteSection(fs, "MIDI", MidiAcia.SaveState);
             WriteSection(fs, "GHD ", GemdosHD.SaveState);
+
+            // A library hard-disk game's disk is temporary: the snapshot has to carry it
+            byte[] disk = HardDiskGames.Active ? Acsi.ReadAttachedImage() : null;
+            if (disk != null)
+                WriteSection(fs, "HDG ", w => HardDiskGames.SaveState(w, disk));
         }
 
         static void WriteSection(Stream fs, string id, Action<Writer> body)

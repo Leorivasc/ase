@@ -344,6 +344,8 @@ namespace ASE
                 };
 
                 message = $"Floppy image loaded: [[green]]{path}[[/green]]";
+                if (Stx.MissingBytes > 0)
+                    message += $" ([[yellow]]{Stx.MissingBytes}[[/yellow]] bytes past the end of the file read as zeros)";
             }
             else
             {

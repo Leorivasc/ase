@@ -162,7 +162,8 @@ public partial class LibraryWindow : Window
 
         string path = Path.Combine(_libraryPath, game.Item.Filename);
 
-        if (!File.Exists(path))
+        // A hard-disk adaptation may be a plain folder instead of a zip
+        if (!File.Exists(path) && !(game.Item.PPAdapted && Directory.Exists(path)))
         {
             await Dialogs.MessageBox("Error", $"Game file not found: {path}",
                 MessageBoxDialogType.Ok, MessageBoxIconType.Error, MessageBoxButton.Ok);
@@ -280,8 +281,8 @@ public partial class LibraryWindow : Window
         _detailOpen = true;
 
         DetailTitle.Text = game.Name;
-        DetailRelease.Text = game.Item.GameMenuGroupRelease;
-        DetailRelease.IsVisible = !string.IsNullOrEmpty(game.Item.GameMenuGroupRelease);
+        DetailRelease.Text = game.Subtitle;
+        DetailRelease.IsVisible = !string.IsNullOrEmpty(game.Subtitle);
         DetailSynopsis.Text = game.SynopsisText ?? "No description available.";
 
         // Box art fills the media area until the screenshot decodes
@@ -575,6 +576,11 @@ public partial class LibraryWindow : Window
         public string ScreenshotPath { get; }
         public string TitlePath { get; }
 
+        /// <summary>The line under the title in the details card: the menu disk a game came
+        /// on, or that it is a hard-disk adaptation (the tile has a badge for that).</summary>
+        public string Subtitle =>
+            Item.GameMenuGroupRelease ?? (Item.PPAdapted ? "Hard disk version · PPutnik" : null);
+
         public Bitmap Cover
         {
             get => _cover;
@@ -593,7 +599,7 @@ public partial class LibraryWindow : Window
         public GameEntry(LibraryItem item, string mediaDir)
         {
             Item = item;
-            Name = PickText(item.Name) ?? item.Filename ?? item.Id;
+            Name = DisplayName(item);
             CoverPath = FindCover(item, mediaDir);
             Details = BuildDetails(item);
             SynopsisText = PickText(item.Synopsis);
@@ -603,6 +609,9 @@ public partial class LibraryWindow : Window
                           ?? FindMedia(item, mediaDir, "TitleScreen-{0}.*");
             TitlePath = FindMedia(item, mediaDir, "TitleScreen-{0}.*");
         }
+
+        /// <summary>The name a library game is shown with.</summary>
+        public static string DisplayName(LibraryItem item) => PickText(item.Name) ?? item.Filename ?? item.Id;
 
         /// <summary>First media file matching the pattern ({0} = game id), or null.</summary>
         static string FindMedia(LibraryItem item, string mediaDir, string pattern)

@@ -1,9 +1,13 @@
+using static ASE.Config;
+
 namespace ASE
 {
     /// <summary>
     /// Combines physical host controls before they reach the IKBD. Two controls mapped
     /// to the same ST key/switch hold it until BOTH are released (keyboard vs gamepad,
     /// d-pad vs analogue stick, or two gamepad buttons mapped to Fire/Space).
+    /// It also routes the joystick bits to the ports: the keyboard joystick and the gamepad
+    /// each drive whichever ports <c>Config.Port0Device</c>/<c>Port1Device</c> plug them into.
     /// Host ownership is not guest hardware state and does not belong in snapshots.
     /// </summary>
     internal static class HostInput
@@ -13,7 +17,44 @@ namespace ASE
         public const int GamepadAxisY = 2049;
         static readonly Dictionary<int, (byte Key, byte Joy)> Held = new();
 
-        public static void Reset() => Held.Clear();
+        // The port configuration as last applied (ApplyPortConfiguration). Unapplied after a
+        // reset, so the first drain of the new session applies whatever the config says.
+        const ConfigOptions.PortDevices Unapplied = (ConfigOptions.PortDevices)(-1);
+        static ConfigOptions.PortDevices _port0 = Unapplied, _port1 = Unapplied;
+
+        public static void Reset()
+        {
+            Held.Clear();
+            _port0 = _port1 = Unapplied;
+        }
+
+        /// <summary>
+        /// Whether a port takes the keyboard joystick. Only then are its keys kept from the ST;
+        /// otherwise they reach it as the ordinary keys they are (the keypad, by default).
+        /// </summary>
+        public static bool KeyboardDrivesJoystick => TakesKeys(_port0) || TakesKeys(_port1);
+
+        static bool TakesKeys(ConfigOptions.PortDevices device) =>
+            device == ConfigOptions.PortDevices.KeysAndGamepad || device == ConfigOptions.PortDevices.KeysOnly;
+
+        /// <summary>
+        /// Plugs into the ports what the configuration says, when it changed since the last
+        /// call. Runs on the emulation thread before every event drain, so a change made in the
+        /// Configuration window lands there and not on the UI thread that made it.
+        /// </summary>
+        public static void ApplyPortConfiguration()
+        {
+            var config = ConfigOptions.RunninConfig;
+            if (config.Port0Device == _port0 && config.Port1Device == _port1) return;
+
+            _port0 = config.Port0Device;
+            _port1 = config.Port1Device;
+
+            // The IKBD decodes a mouse on port 0 only; one configured on port 1 is plugged
+            // into nothing and that port reads empty (see PortState).
+            ACIA.ConnectMouse(_port0 == ConfigOptions.PortDevices.Mouse);
+            Route();
+        }
 
         public static void Key(int source, byte key, bool pressed) => Set(source, key, 0, pressed);
         public static void Joystick(int source, byte mask, bool pressed) => Set(source, 0, mask, pressed);
@@ -31,13 +72,29 @@ namespace ASE
                 ACIA.PushIkbd((byte)(previous.Key | 0x80));
             if (pressed && key != 0 && !keyWasDown) ACIA.PushIkbd(key);
 
-            byte combined = 0;
-            foreach (var binding in Held.Values) combined |= binding.Joy;
-            byte released = (byte)(ACIA.JoystickState & ~combined);
-            byte added = (byte)(combined & ~ACIA.JoystickState);
-            if (released != 0) ACIA.UpdateJoystick(released, false);
-            if (added != 0) ACIA.UpdateJoystick(added, true);
+            Route();
         }
+
+        /// <summary>Hands each port the joystick bits of the devices plugged into it.</summary>
+        static void Route()
+        {
+            byte keys = 0, pad = 0;
+            foreach (var (source, binding) in Held)
+            {
+                if (source < GamepadButtons) keys |= binding.Joy;
+                else pad |= binding.Joy;
+            }
+
+            ACIA.SetJoysticks(PortState(_port0, keys, pad), PortState(_port1, keys, pad));
+        }
+
+        static byte PortState(ConfigOptions.PortDevices device, byte keys, byte pad) => device switch
+        {
+            ConfigOptions.PortDevices.KeysAndGamepad => (byte)(keys | pad),
+            ConfigOptions.PortDevices.KeysOnly => keys,
+            ConfigOptions.PortDevices.GamepadOnly => pad,
+            _ => 0      // empty, or the mouse
+        };
 
         public static void Axis(int source, byte mask)
         {

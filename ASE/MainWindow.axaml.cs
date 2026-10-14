@@ -158,6 +158,12 @@ namespace ASE
             MarqueeTimer.Tick += OnMarqueeTick;
             MarqueeTimer.Start();
 
+            // Centre each drive label in its clip from the height the font actually gives it, as
+            // the HDD label beside it is centred: a fixed Canvas.Top only suits one font, and the
+            // macOS system font's line box is a different height, which left the text riding high.
+            CentreInClip(TextBlockDriveStatus, DriveLabelClip);
+            CentreInClip(TextBlockDriveBStatus, DriveBLabelClip);
+
             // Attach SDL to the window
             var platformHandle = this.TryGetPlatformHandle();
 
@@ -604,6 +610,16 @@ namespace ASE
             return string.IsNullOrEmpty(floppy.DisplayName) ? "Disc" : floppy.DisplayName;
         }
 
+        static void CentreInClip(TextBlock text, Canvas clip)
+        {
+            void Apply(double height) => Canvas.SetTop(text, Math.Round((clip.Height - height) / 2));
+
+            // The first layout may already have run by OnOpened, so apply once now as well.
+            if (text.Bounds.Height > 0)
+                Apply(text.Bounds.Height);
+            text.SizeChanged += (_, e) => Apply(e.NewSize.Height);
+        }
+
         /// <summary>Slides an idle drive label left and back when its disk name is wider than the
         /// status-bar strip, so a long file name can be read in full. Stops itself once nothing
         /// overflows; <see cref="DriveLed"/> starts it again.</summary>
@@ -873,6 +889,11 @@ namespace ASE
             // (FloppyImage.SignalDiskTransition) and the program picks it up.
             if (drive == 0)
             {
+                // A floppy game in A: is the end of a hard-disk game from the library: the next
+                // power-on boots the machine's own disks again (the running one keeps its disk
+                // until then, so answering No below changes nothing for it yet).
+                HardDiskGames.End();
+
                 // Applied before the reboot prompt on purpose: a power-cycle re-sends the mapped
                 // programs to a fresh module (MidiManager.Initialize), so the game comes up with
                 // its instruments already in place.
@@ -1091,8 +1112,45 @@ namespace ASE
             var library = new LibraryWindow();
             string gameFile = await library.ShowDialog<string>(this);
 
-            if (!string.IsNullOrEmpty(gameFile))
+            if (string.IsNullOrEmpty(gameFile))
+                return;
+
+            if (library.SelectedGame?.PPAdapted == true)
+                LaunchHardDiskGame(gameFile, library.SelectedGame);
+            else
                 InsertDisk(0, gameFile, library.SelectedGame);
+        }
+
+        /// <summary>
+        /// Boots one of PPutnik's hard-disk adaptations: builds its disk (see
+        /// <see cref="HardDiskGames"/>) and powers the machine on from it. Unlike a floppy there
+        /// is nothing to ask — the game can only start from a power-on.
+        /// </summary>
+        async void LaunchHardDiskGame(string source, Models.LibraryItem game)
+        {
+            string title = LibraryWindow.GameEntry.DisplayName(game);
+
+            if (!HardDiskGames.Start(source, title, out string error, out string warning))
+            {
+                await Dialogs.MessageBox("Error", error, MessageBoxDialogType.Ok, MessageBoxIconType.Error, MessageBoxButton.Ok);
+                return;
+            }
+
+            // A floppy left in A: would boot before the hard disk does
+            ASEMain.RunWhilePaused(Drive(0).Eject, out _);
+            ZipFile[0] = "";
+            DisableEjectMenu(0);
+
+            // Same as a floppy from the library: the game brings its MT-32 mapping along, and the
+            // power-on below hands it to a fresh module
+            MT32.Mt32Profiles.SetCurrentGame(game);
+
+            ASEMain.HardReset();
+
+            SetStatusBarText($"Hard-disk game {title} started");
+
+            if (warning != null)
+                await Dialogs.MessageBox("Hard-disk game", warning, MessageBoxDialogType.Ok, MessageBoxIconType.Information, MessageBoxButton.Ok);
         }
         
         private void OnConfigureLibraryClick(object sender, RoutedEventArgs e)

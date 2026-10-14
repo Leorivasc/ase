@@ -503,6 +503,43 @@
                 </TabItem.Header>
 
                     <StackPanel Classes="settingsContent" Spacing="12">
+                    
+                        <Border Classes="card">
+                            <StackPanel Spacing="12">
+                                <StackPanel Spacing="3">
+                                    <TextBlock Classes="section" Text="Atari ports" />
+                                    <TextBlock Classes="description" Text="Devices connected to the Atari ports." />
+                                </StackPanel>
+
+                                <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" HorizontalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Grid.Column="0" VerticalAlignment="Center">
+                                        <Svg Path="avares://ASE/Assets/Icons/mouse.svg" Margin="0,0,4,0"></Svg>
+                                        <Svg Path="avares://ASE/Assets/Icons/joystick.svg"></Svg>
+                                    </StackPanel>
+                                    <ComboBox Name="ComboPort0" Grid.Column="1" Width="200">
+                                        <ComboBoxItem>Disconnected</ComboBoxItem>
+                                        <ComboBoxItem>Mouse</ComboBoxItem>
+                                        <ComboBoxItem>Keys and Gamepad</ComboBoxItem>
+                                        <ComboBoxItem>Keys only</ComboBoxItem>
+                                        <ComboBoxItem>Gamepad only</ComboBoxItem>
+                                    </ComboBox>
+                                    <StackPanel Orientation="Horizontal" Grid.Column="3" VerticalAlignment="Center">
+                                        <Svg Path="avares://ASE/Assets/Icons/joystick.svg"></Svg>
+                                    </StackPanel>
+                                    <!-- The item stays so both combos share the PortDevices order:
+                                         the IKBD decodes a mouse on port 0 only. -->
+                                    <ComboBox Name="ComboPort1" Grid.Column="4" Width="200">
+                                        <ComboBoxItem>Disconnected</ComboBoxItem>
+                                        <ComboBoxItem IsEnabled="False" ToolTip.ShowOnDisabled="True"
+                                                      ToolTip.Tip="The ST reads a mouse on port 0 only.">Mouse</ComboBoxItem>
+                                        <ComboBoxItem>Keys and Gamepad</ComboBoxItem>
+                                        <ComboBoxItem>Keys only</ComboBoxItem>
+                                        <ComboBoxItem>Gamepad only</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    
                         <Border Classes="card">
                             <StackPanel Spacing="12">
                                 <StackPanel Spacing="3">

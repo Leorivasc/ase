@@ -95,6 +95,13 @@ namespace ASE
             ComboLB.SelectedIndex = (int)Config.ConfigOptions.RunninConfig.GamepadButtonLB;
             ComboRB.SelectedIndex = (int)Config.ConfigOptions.RunninConfig.GamepadButtonRB;
 
+            // Joystick ports: edited locally and committed on OK, so Cancel has nothing to
+            // undo. A mouse on port 1 (only reachable by editing config.json) reads as empty.
+            var port1 = Config.ConfigOptions.RunninConfig.Port1Device;
+            ComboPort0.SelectedIndex = (int)Config.ConfigOptions.RunninConfig.Port0Device;
+            ComboPort1.SelectedIndex = (int)(port1 == Config.ConfigOptions.PortDevices.Mouse
+                ? Config.ConfigOptions.PortDevices.Disconnected : port1);
+
             RebindGLSliders();
             RebindJoymap();
 
@@ -329,6 +336,7 @@ namespace ASE
             // The disks are attached at power-on (the ACSI partition count even decides the
             // GEMDOS drive letter), so any change here needs a reset.
             bool bootFromHd = ChkBootFromHardDisk.IsChecked == true;
+            bool hardDisksChanged = false;
 
             if (gemdosOn != Config.ConfigOptions.RunninConfig.GemdosDriveEnabled ||
                 acsiOn != Config.ConfigOptions.RunninConfig.AcsiImageEnabled ||
@@ -337,6 +345,7 @@ namespace ASE
                 (acsiOn && acsiImage != Config.ConfigOptions.RunninConfig.AcsiImagePath))
             {
                 ForceReset = true;
+                hardDisksChanged = true;
             }
 
             if (ForceReset)
@@ -356,12 +365,22 @@ namespace ASE
             Config.ConfigOptions.RunninConfig.GamepadButtonLB = (Config.ConfigOptions.GamepadButtonsMapping)ComboLB.SelectedIndex;
             Config.ConfigOptions.RunninConfig.GamepadButtonRB = (Config.ConfigOptions.GamepadButtonsMapping)ComboRB.SelectedIndex;
 
+            // Save the joystick ports. No reset: the emulation thread plugs the devices in on
+            // its next event drain (HostInput.ApplyPortConfiguration).
+            Config.ConfigOptions.RunninConfig.Port0Device = (Config.ConfigOptions.PortDevices)ComboPort0.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.Port1Device = (Config.ConfigOptions.PortDevices)ComboPort1.SelectedIndex;
+
             // Save the hard disks (validated above)
             Config.ConfigOptions.RunninConfig.GemdosDriveEnabled = gemdosOn;
             Config.ConfigOptions.RunninConfig.GemdosDrivePath = gemdosDir;
             Config.ConfigOptions.RunninConfig.AcsiImageEnabled = acsiOn;
             Config.ConfigOptions.RunninConfig.AcsiImagePath = acsiImage;
             Config.ConfigOptions.RunninConfig.BootFromHardDisk = bootFromHd;
+
+            // Changing the disks is asking for them: a hard-disk game from the library would
+            // otherwise keep the bus on the reset that is about to apply them
+            if (hardDisksChanged)
+                HardDiskGames.End();
 
             // Save directories (empty screenshots/snapshots fall back to the defaults
             // next to config.json at save time)
@@ -518,6 +537,8 @@ namespace ASE
 
         bool CheckTOSCompatibility(string tospath)
         {
+            tospath = Config.ResolveFilePath(tospath);
+
             if (File.Exists(tospath))
             {
                 long fileSize = new FileInfo(tospath).Length;
@@ -760,7 +781,9 @@ namespace ASE
         {
             try
             {
-                string running = Config.ConfigOptions.RunninConfig.AcsiImagePath;
+                // What the ACSI emulation has open, which is not the configured image while a
+                // hard-disk game from the library runs
+                string running = Acsi.AttachedImagePath;
                 return !string.IsNullOrWhiteSpace(running) &&
                        string.Equals(Path.GetFullPath(path), Path.GetFullPath(running),
                                      StringComparison.OrdinalIgnoreCase);
@@ -835,11 +858,17 @@ namespace ASE
 
         // A 256KB TOS image (TOS 1.06-2.06) only boots on the STE.
         static bool IsSteOnlyRom(string tospath)
-            => File.Exists(tospath) && new FileInfo(tospath).Length == 256 * 1024;
+            => RomSize(tospath) == 256 * 1024;
 
         // A 192KB TOS image (TOS 1.00-1.04) only boots on an STF/FM (with or without blitter).
         static bool IsStfRom(string tospath)
-            => File.Exists(tospath) && new FileInfo(tospath).Length == 192 * 1024;
+            => RomSize(tospath) == 192 * 1024;
+
+        static long RomSize(string tospath)
+        {
+            tospath = Config.ResolveFilePath(tospath);
+            return File.Exists(tospath) ? new FileInfo(tospath).Length : -1;
+        }
         private void Memory_SelectionChanged(object sender, SelectionChangedEventArgs e) => ForceReset = (Config.ConfigOptions.RunninConfig.RAMConfiguration != configBackup.RAMConfiguration) ? true : false;
 
         private void SliderCurvature_OnValueChanged(object sender, RangeBaseValueChangedEventArgs e) => Config.ConfigOptions.RunninConfig.Curvature = (float)SliderCurvature.Value;

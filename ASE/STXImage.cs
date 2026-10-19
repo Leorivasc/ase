@@ -106,6 +106,38 @@ namespace ASE
             return t;
         }
 
+        /// <summary>
+        /// Writes the payload of every sector that has one, tracks in key order and sectors in
+        /// rotational order: what writes have changed since the file was parsed. Read back by
+        /// <see cref="LoadSectorData"/> over the same file, which yields the same structure and
+        /// therefore the same walk (FloppyImage.SaveMedia).
+        /// </summary>
+        public void SaveSectorData(Snapshot.Writer w)
+        {
+            foreach (int key in _tracks.Keys.OrderBy(k => k))
+                foreach (Sector sec in _tracks[key].Sectors)
+                {
+                    w.Bool(sec.Data != null);
+                    if (sec.Data != null)
+                        w.Bytes(sec.Data);
+                }
+        }
+
+        /// <summary>Puts back sector payloads written by <see cref="SaveSectorData"/>. Throws when
+        /// they do not fit this image — another file, or a corrupt payload.</summary>
+        public void LoadSectorData(Snapshot.Reader r)
+        {
+            foreach (int key in _tracks.Keys.OrderBy(k => k))
+                foreach (Sector sec in _tracks[key].Sectors)
+                {
+                    if (r.Bool() != (sec.Data != null))
+                        throw new InvalidDataException("STX sector data does not match the image.");
+
+                    if (sec.Data != null)
+                        Array.Copy(r.Bytes(sec.Data.Length), sec.Data, sec.Data.Length);
+                }
+        }
+
         public static STXImage TryLoad(byte[] f, out string error)
         {
             error = "";

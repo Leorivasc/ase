@@ -45,6 +45,10 @@ namespace ASE
         static nint GamepadController;
         const int GamepadDeadzone = 8000;
 
+        // Where the left stick was pushed last (-1, 0, 1) while the time warp's window is open:
+        // one step per push, not one per axis event
+        static int _timeWarpStick;
+
         // SDL input plumbing. SDL_PumpEvents may only run on the thread that initialised the
         // video subsystem (the UI thread), so a dispatcher timer keeps the queue fed at Input
         // priority — this is what polls the gamepad everywhere and translates keyboard/mouse on
@@ -77,8 +81,33 @@ namespace ASE
             }
         }
 
+        // While a null-modem or MIDI cable game is connected, the frame is emulated in this many
+        // slices, each started when the wall clock reaches it, instead of in one burst followed
+        // by a sleep. Machines exchanging over a cable care about each other's present: in a
+        // burst each runs up to a frame ahead of the wall clock, with its own phase, so a byte
+        // reaches the other end after it has finished its frame and waits for the next — a frame
+        // or two per exchange (Stunt Car Racer, NETPLAY.md §6.3), and per hop of a MIDI ring.
+        // Paced in slices, every machine stays within a slice of the wall clock, and what the
+        // USART or the MIDI ACIA sent leaves at the end of each one. Only with a cable: for
+        // ordinary input the burst is the better shape, since the input is read just before the
+        // frame is emulated and the picture published just after.
+        const int CableSlices = 4;
+
+        /// <summary>Waits for the stopwatch to reach <paramref name="target"/> (seconds) at the
+        /// end of a slice: sleeping only, and returning within a millisecond of it — a slice
+        /// started that little early costs nothing, and spinning would burn a core four times a
+        /// frame. A target already behind returns at once.</summary>
+        static void WaitForSlice(Stopwatch sw, double target)
+        {
+            while (target - (double)sw.ElapsedTicks / Stopwatch.Frequency > 0.001)
+                SDL_Delay(1);
+        }
+
         public static FloppyImage driveA = new FloppyImage();
         public static FloppyImage driveB = new FloppyImage();
+
+        /// <summary>The two floppy drives, by index: 0 = A, 1 = B.</summary>
+        public static FloppyImage Drive(int index) => index == 1 ? driveB : driveA;
 
         // Frame hand-off to the GL thread, without copying anything.
         // Three buffers rotate through three roles: the one the emulation is drawing into, the one
@@ -286,6 +315,10 @@ namespace ASE
             // Unpause only after TurnOn() has created _ym: the moment the device is unpaused
             // the SDL audio thread starts firing YM2149.AudioCallback, which reads ASEMain._ym.
             SDL.SDL_PauseAudioDevice(_audiodev, 0); // Turn on sound
+
+            // --record / --replay: through the same path as the Emulation menu, now that the
+            // machine is up (a recording starts from the running machine).
+            Netplay.InputRecording.StartFromCommandLine();
         }
 
         public static void EmulatorLoop()
@@ -297,6 +330,7 @@ namespace ASE
             var sw = Stopwatch.StartNew();
             double next = 0.0;
             var last = Stopwatch.StartNew();
+            bool waitedForInput = false;
 
             while (_isRunning)
             {
@@ -328,6 +362,31 @@ namespace ASE
 
                 if (!IsPaused)
                 {
+                    // A shared online game: the frame cannot start until every player's input
+                    // for it has arrived. Meanwhile host input keeps being collected (it goes
+                    // into this player's next frame) and the loop comes back here, through the
+                    // freeze rendezvous, a millisecond later. One compare in normal use.
+                    if (!Netplay.MachineInput.FrameReady())
+                    {
+                        DrainSdlEvents();
+                        SDL_Delay(1);
+                        waitedForInput = true;
+                        continue;
+                    }
+
+                    // The time spent waiting is not made up afterwards: the frames that follow
+                    // keep their pace from now, instead of running flat out to catch up and
+                    // getting ahead of the other machines again.
+                    if (waitedForInput)
+                    {
+                        waitedForInput = false;
+                        next = Math.Max(next, (double)sw.ElapsedTicks / Stopwatch.Frequency);
+                    }
+
+                    // A recording, playback or shared game: the changes logged for this frame (a
+                    // disk swap) and the input it will apply. A no-op in normal use.
+                    Netplay.MachineInput.BeginFrame();
+
                     /*
                      * The PAL Atari ST has 313 scanlines per frame. A 50 Hz line lasts 512 CPU
                      * cycles at 8 MHz (64 us) and a 60 Hz one 508. Sync ($FF820A) and resolution
@@ -354,6 +413,13 @@ namespace ASE
                     long lineBase = frameClockBase;
                     bool hitBreakpoint = false;
 
+                    // A cable game is paced in slices (see CableSlices); anything else runs the
+                    // frame in one burst. 'next' is still the time this frame was due to start.
+                    double frameDue = next;
+                    int sliceLines = (Netplay.SerialCable.Plugged || Netplay.MidiCable.Plugged) && !ConfigOptions.RunninConfig.MaxSpeed
+                        ? (VideoTiming.SCANLINES_PER_FRAME + CableSlices - 1) / CableSlices
+                        : 0;
+
                     for (int scanline = 0; scanline < VideoTiming.SCANLINES_PER_FRAME; scanline++)
                     {
                         // Input first: consume whatever the UI thread has pumped into SDL's
@@ -362,12 +428,17 @@ namespace ASE
                         // for the next frame boundary.
                         long profileMark = FrameProfiler.Stamp();
                         DrainSdlEvents();
+
+                        // In a recording or playback the drain above only captures: the frame's
+                        // input lands here, all of it, on the session's line for this frame
+                        // (see Netplay.MachineInput). One compare in normal use.
+                        Netplay.MachineInput.AtScanline(scanline);
                         profileMark = FrameProfiler.AddInput(profileMark);
 
                         VideoTiming.StartLine(scanline, lineBase);
 
                         // Run the CPU until the Display Enable (DE) signal drops. This is where
-                        // Timer B and the HBL MUST fire (cycle 376 at 50 Hz colour, 184 in mono).
+                        // Timer B MUST fire (cycle 376 at 50 Hz colour, 184 in mono).
                         int cyclesToDEStop = VideoTiming.DE_STOP_CYCLE;
                         if (RunCpuUntil(lineBase + cyclesToDEStop)) { hitBreakpoint = true; break; }
 
@@ -394,21 +465,26 @@ namespace ASE
                         if (VideoTiming.DisplayEnabledNow())
                             _mfp.TickTimerB_EventCount();
 
-                        // Fire the HBL right at the start of the H-Blank
-                        _mfp.irqController.RaiseHBL();
-
                         // Run the rest of the scanline (H-Blank / right border). Its length is NOT
                         // a constant: the GLUE's horizontal counter wraps at 508 cycles in 60 Hz
                         // and 512 in 50 Hz, so the frequency in effect at the wrap point decides.
-                        // The CPU is run to the longest a line can be and the length is resolved
-                        // afterwards — ResolveLineCycles only looks at the sync writes stamped at
-                        // or before the wrap, so the answer is the same as stopping there, without
-                        // the extra sync point per line that splitting the run would cost. On a
-                        // 508-cycle line that leaves the CPU up to 4 cycles into the next line,
-                        // which is what lineBase (below) absorbs, exactly like the per-instruction
-                        // overshoot RunForCycles already produces.
-                        if (RunCpuUntil(lineBase + VideoTiming.CYCLES_PER_LINE)) { hitBreakpoint = true; break; }
+                        // The CPU is run to the shortest a line can be, where every sync write
+                        // that decides its length has been made (ResolveLineCycles only looks at
+                        // those stamped at or before the wrap), and a 512-cycle line then runs its
+                        // last four cycles. RunForCycles' per-instruction overshoot past the end
+                        // is what lineBase (below) absorbs.
+                        if (RunCpuUntil(lineBase + VideoTiming.SHORTEST_LINE_CYCLES)) { hitBreakpoint = true; break; }
                         int lineCycles = VideoTiming.ResolveLineCycles();
+                        if (RunCpuUntil(lineBase + lineCycles)) { hitBreakpoint = true; break; }
+
+                        // The HBL fires at the END of the line (cycle 512 at 50 Hz, 508 at 60 Hz,
+                        // 224 in mono: Hatari's Hbl_Int_Pos_*), not where the display stops, so
+                        // its handler starts at the beginning of the next line. Code synced to it
+                        // counts cycles from there: The Chaos Engine on STE waits 95 NOPs after an
+                        // HBL to write the video counter in the right border, and an HBL raised at
+                        // cycle 376 put that write in the middle of the next line's display — the
+                        // status panel came out 32 bytes off and shaking.
+                        _mfp.irqController.RaiseHBL();
 
                         // Everything above (both CPU slices and the chips they drive) is charged
                         // to 'cpu'; what follows, to 'video'.
@@ -433,10 +509,27 @@ namespace ASE
                         // shortening above and RunForCycles' per-instruction overshoot are absorbed
                         // line to line instead of accumulating down the frame.
                         lineBase += lineCycles;
+
+                        // The end of a slice in a cable game: what the USART or the MIDI ACIA sent
+                        // so far leaves, and the emulation waits for the wall clock to reach this
+                        // point of the frame before running the next slice.
+                        if (sliceLines > 0 && (scanline + 1) % sliceLines == 0)
+                        {
+                            Netplay.SerialCable.Flush();
+                            Netplay.MidiCable.Flush();
+
+                            long profileSlice = FrameProfiler.Stamp();
+                            WaitForSlice(sw, frameDue + (lineBase - frameClockBase) / 8_000_000.0);
+                            FrameProfiler.AddIdle(profileSlice);
+                        }
                     }
 
                     if (hitBreakpoint)
                     {
+                        // A recording or playback cannot go on: this frame never completes, and
+                        // the debugger can change the machine at will.
+                        Netplay.MachineInput.End("the machine stopped in the debugger");
+
                         // Park the machine right where the CPU stopped (PC at the guarded
                         // instruction) and pop the debugger. The rest of the frame is abandoned:
                         // the partial framebuffer is not published (the previous full frame stays
@@ -470,6 +563,17 @@ namespace ASE
 
                     EnforceFloppyDriveCount();
 
+                    // A recording, playback or shared game: checkpoints, the end of a playback.
+                    Netplay.MachineInput.EndFrame();
+
+                    // An online session's MIDI cable: what the ST sent in the frame's last slice
+                    // leaves now.
+                    Netplay.MidiCable.EndFrame();
+
+                    // And its null-modem cable: the same for the RS-232 port, plus the other
+                    // end's modem-control lines onto CTS and DCD.
+                    Netplay.SerialCable.EndFrame();
+
                     // Steer the audio queue back towards its target latency. Once per frame is
                     // the right granularity: it reacts within a frame of a stall without the
                     // synthesis path having to look at the queue at all.
@@ -482,6 +586,10 @@ namespace ASE
 
                     // For future use: recording, etc.
                     OnFrameComplete?.Invoke();
+
+                    // Once a second, a moment of the machine and of the picture just published,
+                    // for the time warp. Nothing on the other frames.
+                    TimeWarp.EndFrame(_lastPublished);
 
                     MainWindow.RefreshDriveLed();
 
@@ -498,7 +606,9 @@ namespace ASE
                     long frameCycles = lineBase - frameClockBase;
                     next += frameCycles > 0 ? frameCycles / 8_000_000.0 : frame;
 
-                    if (!ConfigOptions.RunninConfig.MaxSpeed)
+                    // A shared game runs at the real pace whatever MaxSpeed says: the other
+                    // machines run at it, and this one would only wait for them every frame.
+                    if (!ConfigOptions.RunninConfig.MaxSpeed || Netplay.MachineInput.Mode == Netplay.MachineInput.Modes.Lockstep)
                     {
                         long profileIdle = FrameProfiler.Stamp();
 
@@ -534,6 +644,11 @@ namespace ASE
                     // gamepad hot-plug are still seen (HandleEvents swallows the press
                     // events while paused), without busy-spinning a whole core.
                     DrainSdlEvents();
+
+                    // A shared game keeps the other machines supplied with what this one already
+                    // sent: they may still be waiting for some of it.
+                    Netplay.MachineInput.Idle();
+
                     SDL_Delay(5);
                 }
             }
@@ -668,9 +783,14 @@ namespace ASE
         /// </summary>
         /// <summary>
         /// Set once the halt has been reported and the debugger opened for it. Cleared by
-        /// <see cref="TurnOn"/>, which is the only way out of a halt — as on the real chip.
+        /// <see cref="TurnOn"/>, which is the only way out of a halt — as on the real chip —
+        /// and by the time warp going back to a moment before it (<see cref="ForgetCpuHalt"/>).
         /// </summary>
         static bool _cpuHaltReported;
+
+        /// <summary>The CPU was rebuilt around a moment of the past (TimeWarp): a halt reported
+        /// before it belongs to a future that is gone.</summary>
+        internal static void ForgetCpuHalt() => _cpuHaltReported = false;
 
         static void ReportCpuHalted()
         {
@@ -808,7 +928,7 @@ namespace ASE
             }, out error);
         }
 
-        static string NewTimestampedPath(string dir, string prefix, string extension)
+        internal static string NewTimestampedPath(string dir, string prefix, string extension)
         {
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string path = Path.Combine(dir, $"{prefix}_{stamp}.{extension}");
@@ -881,10 +1001,16 @@ namespace ASE
             // the core's own flag goes with it — this is the report latch beside it).
             _cpuHaltReported = false;
 
+            // A new machine has no past to go back to
+            TimeWarp.Clear();
+
             // Starts with mouse uncaptured
             CaptureMouse(false);
 
             _ym = new YM2149(sampleRate: Config.ConfigOptions.RunninConfig.SampleRate, chipClockHz: 2000000.0);
+
+            // A new machine draws new random bits (a restored snapshot puts its own back).
+            MachineRandom.Reseed();
 
             // TOS missing or invalid: leave the machine off (black screen). The user can pick a
             // TOS in the Configuration window, whose OK triggers a HardReset and lands here again.
@@ -917,7 +1043,33 @@ namespace ASE
         public static void HardReset()
         {
             StopEmulationThread();
+
+            // A shared game's host carries on sharing the new machine once it is up (the epoch
+            // that ends here starts a new one); a guest that played the host's machine gets its
+            // own back now.
+            Netplay.InputRecording.EndSession("the machine was reset");
+            Netplay.Lockstep.BeforePowerOn();
+
             TurnOn();
+        }
+
+        /// <summary>
+        /// Rebuilds the machine from <paramref name="snap"/> and starts it again, running
+        /// <paramref name="beforeStart"/> once the snapshot is applied and before the first frame:
+        /// how a recording or a playback begins, on a machine that is exactly the snapshot's.
+        /// Same failure behaviour as <see cref="RestoreSnapshot"/>, without beforeStart.
+        /// </summary>
+        public static bool RestartFromSnapshot(Snapshot.SnapshotFile snap, Action beforeStart, out string error)
+        {
+            StopEmulationThread();
+
+            // TurnOn reports a machine that would not power on by returning false, not by
+            // throwing, so StartWithSnapshot has no message for it.
+            bool ok = StartWithSnapshot(snap, out error, beforeStart);
+            if (!ok && error == null)
+                error = "the machine could not be powered on (is the configured TOS file there?)";
+
+            return ok;
         }
 
         /// <summary>Stops the emulation thread, waiting until it exits. Safe to call when the
@@ -951,6 +1103,7 @@ namespace ASE
             }
 
             StopEmulationThread();
+            Netplay.InputRecording.EndSession("a snapshot was restored");
 
             return StartWithSnapshot(snap, out error);
         }
@@ -960,7 +1113,7 @@ namespace ASE
         /// be running. On failure it reverts to the previous configuration and boots clean, so
         /// the machine is always left running.
         /// </summary>
-        static bool StartWithSnapshot(Snapshot.SnapshotFile snap, out string error)
+        static bool StartWithSnapshot(Snapshot.SnapshotFile snap, out string error, Action beforeStart = null)
         {
             error = null;
 
@@ -981,7 +1134,11 @@ namespace ASE
                 // machine with its own disks, and ends any game session.
                 HardDiskGames.LoadState(snap.Sections.GetValueOrDefault("HDG "));
 
-                bool ok = TurnOn(() => Snapshot.Apply(snap));
+                bool ok = TurnOn(() =>
+                {
+                    Snapshot.Apply(snap);
+                    beforeStart?.Invoke();
+                });
                 MainWindow?.RefreshAspectRatio();   // the snapshot may have a different monitor type
                 return ok;
             }
@@ -1066,6 +1223,9 @@ namespace ASE
             if (_thread != null && _thread != Thread.CurrentThread)
                 _thread.Join();
 
+            // Closes a recording's file properly (a playback just ends).
+            Netplay.InputRecording.EndSession("ASE was closed");
+
             _sdlPumpTimer?.Stop();
 
             if (_audiodev != 0)
@@ -1118,6 +1278,25 @@ namespace ASE
             }, DispatcherPriority.Input);
         }
 
+        /// <summary>What the configuration maps a gamepad button to; None for the D-pad and the
+        /// buttons that cannot be mapped.</summary>
+        public static ConfigOptions.GamepadButtonsMapping GamepadMapping(SDL.SDL_GameControllerButton button)
+        {
+            var c = ConfigOptions.RunninConfig;
+            return button switch
+            {
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_A => c.GamepadButtonA,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_B => c.GamepadButtonB,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_X => c.GamepadButtonX,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_Y => c.GamepadButtonY,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_LEFTSHOULDER => c.GamepadButtonLB,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_RIGHTSHOULDER => c.GamepadButtonRB,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_LEFTSTICK => c.GamepadButtonLS,
+                SDL.SDL_GameControllerButton.SDL_CONTROLLER_BUTTON_RIGHTSTICK => c.GamepadButtonRS,
+                _ => ConfigOptions.GamepadButtonsMapping.None,
+            };
+        }
+
         public static void GamepadButton(ConfigOptions.GamepadButtonsMapping buttonMapping, bool pressed,
             int source = HostInput.GamepadButtons)
         {
@@ -1141,6 +1320,23 @@ namespace ASE
                 case ConfigOptions.GamepadButtonsMapping.T:
                     HostInput.Key(source, 0x14, pressed);
                     break;
+
+                // The time warp, from the pad: on the press only, and nothing reaches the ST.
+                // Posted to the UI thread like Ctrl+Shift+F10, since going back parks this one.
+                case ConfigOptions.GamepadButtonsMapping.Back5Seconds:
+                case ConfigOptions.GamepadButtonsMapping.Back10Seconds:
+                    if (pressed)
+                    {
+                        int seconds = buttonMapping == ConfigOptions.GamepadButtonsMapping.Back5Seconds ? 5 : 10;
+                        Dispatcher.UIThread.Post(() => MainWindow.DoTimeWarpStep(seconds), DispatcherPriority.Input);
+                    }
+                    break;
+
+                case ConfigOptions.GamepadButtonsMapping.OpenTimeWarp:
+                    if (pressed)
+                        Dispatcher.UIThread.Post(() => MainWindow.OpenTimeWarp(), DispatcherPriority.Input);
+                    break;
+
                 default:
                     HostInput.Key(source, 0, false);
                     break;
@@ -1155,8 +1351,8 @@ namespace ASE
                 e.window.windowEvent == SDL_WindowEventID.SDL_WINDOWEVENT_FOCUS_LOST)
             {
                 HostInput.ReleaseAll();
-                ACIA.MouseButtonChanged(left: true, pressed: false);
-                ACIA.MouseButtonChanged(left: false, pressed: false);
+                Netplay.MachineInput.MouseButton(left: true, pressed: false);
+                Netplay.MachineInput.MouseButton(left: false, pressed: false);
                 return;
             }
 
@@ -1171,6 +1367,32 @@ namespace ASE
             {
                 if (GamepadController == nint.Zero || e.caxis.which !=
                     SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(GamepadController))) return;
+            }
+
+            // The time warp's window open: the gamepad drives it — pick a moment, continue, go
+            // back to the game — not the ST, which is paused under it anyway. Button presses are
+            // taken here; releases and the stick still go on below, which keeps clearing what
+            // the ports believe held (the window only needs the stick's push, as an edge).
+            if (TimeWarpWindow.Current is { } timeWarp)
+            {
+                if (e.type == SDL_EventType.SDL_CONTROLLERBUTTONDOWN)
+                {
+                    var button = (SDL.SDL_GameControllerButton)e.cbutton.button;
+                    Dispatcher.UIThread.Post(() => timeWarp.OnPadButton(button), DispatcherPriority.Input);
+                    return;
+                }
+
+                if (e.type == SDL_EventType.SDL_CONTROLLERAXISMOTION &&
+                    (SDL.SDL_GameControllerAxis)e.caxis.axis == SDL.SDL_GameControllerAxis.SDL_CONTROLLER_AXIS_LEFTX)
+                {
+                    int push = e.caxis.axisValue < -GamepadDeadzone ? -1 : e.caxis.axisValue > GamepadDeadzone ? 1 : 0;
+                    if (push != _timeWarpStick)
+                    {
+                        _timeWarpStick = push;
+                        if (push != 0)
+                            Dispatcher.UIThread.Post(() => timeWarp.Move(push), DispatcherPriority.Input);
+                    }
+                }
             }
 
             // While the emulation is paused a UI window owns the host input: swallow the
@@ -1189,6 +1411,29 @@ namespace ASE
                     case SDL_EventType.SDL_MOUSEMOTION:
                     case SDL_EventType.SDL_CONTROLLERBUTTONDOWN:
                         return;
+                }
+            }
+
+            // The time warp's keys: Ctrl+Shift+F10 opens its window, Ctrl+Shift+← goes back five
+            // seconds. Ahead of the keyboard joystick, which may be the cursor keys. Only with
+            // Ctrl and Shift and without Alt — Alt+Shift+cursors is GEM's keyboard mouse, and must
+            // stay the ST's — and F10 and ← never reach the ST (Ctrl and Shift already did, as
+            // they went down). Posted to the UI thread: going back parks this one.
+            if (e.type == SDL_EventType.SDL_KEYDOWN && e.key.repeat == 0 &&
+                (e.key.keysym.mod & SDL.SDL_Keymod.KMOD_CTRL) != 0 &&
+                (e.key.keysym.mod & SDL.SDL_Keymod.KMOD_SHIFT) != 0 &&
+                (e.key.keysym.mod & SDL.SDL_Keymod.KMOD_ALT) == 0)
+            {
+                if (e.key.keysym.scancode == SDL.SDL_Scancode.SDL_SCANCODE_F10)
+                {
+                    Dispatcher.UIThread.Post(() => MainWindow.OpenTimeWarp(), DispatcherPriority.Input);
+                    return;
+                }
+
+                if (e.key.keysym.scancode == SDL.SDL_Scancode.SDL_SCANCODE_LEFT)
+                {
+                    Dispatcher.UIThread.Post(() => MainWindow.DoTimeWarpStep(), DispatcherPriority.Input);
+                    return;
                 }
             }
 
@@ -1368,6 +1613,7 @@ namespace ASE
                     return;
                 }
 
+
                 if (e.type == SDL.SDL_EventType.SDL_KEYDOWN)
                 {
                     int scancode = (int)e.key.keysym.scancode;
@@ -1421,7 +1667,7 @@ namespace ASE
                     // Forwards the relative mouse motion inside the emulator window to the ST.
                     // The IKBD accumulates it and reports it on its own sample tick: a host
                     // mouse fires far more often than the 7812.5 baud line can carry.
-                    ACIA.MouseMotion(e.motion.xrel, e.motion.yrel);
+                    Netplay.MachineInput.MouseMotion(e.motion.xrel, e.motion.yrel);
                 }
                 else if (e.type == SDL.SDL_EventType.SDL_MOUSEBUTTONDOWN ||
                          e.type == SDL.SDL_EventType.SDL_MOUSEBUTTONUP)
@@ -1431,9 +1677,9 @@ namespace ASE
                     // also reaches the Avalonia overlay handler on Windows.
                     bool down = e.type == SDL.SDL_EventType.SDL_MOUSEBUTTONDOWN;
                     if (e.button.button == SDL.SDL_BUTTON_LEFT)
-                        ACIA.MouseButtonChanged(left: true, pressed: down);
+                        Netplay.MachineInput.MouseButton(left: true, pressed: down);
                     else if (e.button.button == SDL.SDL_BUTTON_RIGHT)
-                        ACIA.MouseButtonChanged(left: false, pressed: down);
+                        Netplay.MachineInput.MouseButton(left: false, pressed: down);
                 }
             }
         }

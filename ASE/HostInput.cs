@@ -26,7 +26,18 @@ namespace ASE
         {
             Held.Clear();
             _port0 = _port1 = Unapplied;
+
+            // What is forgotten here is never released: the input boundary forgets it too
+            Netplay.MachineInput.ForgetHeld();
         }
+
+        /// <summary>
+        /// Forgets which port configuration was applied, so the next event drain applies it again.
+        /// For the end of a recording or a playback: what is plugged into the ports went into the
+        /// session meanwhile (or, in a playback, nowhere), and the live machine has to get it back.
+        /// Unlike <see cref="Reset"/> it keeps the controls held on the host.
+        /// </summary>
+        public static void InvalidatePortConfiguration() => _port0 = _port1 = Unapplied;
 
         /// <summary>
         /// Whether a port takes the keyboard joystick. Only then are its keys kept from the ST;
@@ -52,7 +63,7 @@ namespace ASE
 
             // The IKBD decodes a mouse on port 0 only; one configured on port 1 is plugged
             // into nothing and that port reads empty (see PortState).
-            ACIA.ConnectMouse(_port0 == ConfigOptions.PortDevices.Mouse);
+            Netplay.MachineInput.ConnectMouse(_port0 == ConfigOptions.PortDevices.Mouse);
             Route();
         }
 
@@ -69,8 +80,8 @@ namespace ASE
             if (pressed && (key != 0 || joy != 0)) Held[source] = (key, joy);
 
             if (previous.Key != 0 && !Held.Values.Any(v => v.Key == previous.Key))
-                ACIA.PushIkbd((byte)(previous.Key | 0x80));
-            if (pressed && key != 0 && !keyWasDown) ACIA.PushIkbd(key);
+                Netplay.MachineInput.Key((byte)(previous.Key | 0x80));
+            if (pressed && key != 0 && !keyWasDown) Netplay.MachineInput.Key(key);
 
             Route();
         }
@@ -85,7 +96,7 @@ namespace ASE
                 else pad |= binding.Joy;
             }
 
-            ACIA.SetJoysticks(PortState(_port0, keys, pad), PortState(_port1, keys, pad));
+            Netplay.MachineInput.Joysticks(PortState(_port0, keys, pad), PortState(_port1, keys, pad));
         }
 
         static byte PortState(ConfigOptions.PortDevices device, byte keys, byte pad) => device switch

@@ -54,6 +54,13 @@ namespace ASE
         // motion and button presses go nowhere. Not IKBD state, so no reset touches it.
         public static bool MouseConnected { get; private set; } = true;
 
+        /// <summary>
+        /// The divisor the IKBD applies to host motion instead of <c>MouseSensitivity</c>, when
+        /// above zero. A shared game sets 1: every player's motion arrives already divided by
+        /// their own sensitivity (Netplay.MachineInput.MouseMotion), so each keeps theirs.
+        /// </summary>
+        public static float MouseDivisorOverride;
+
         private static List<byte> _commandBuffer = new List<byte>();
 
         // Enabled or disabled for the ACIA chip
@@ -937,6 +944,18 @@ namespace ASE
         }
 
         /// <summary>
+        /// Sets whether the mouse is plugged into port 0, with none of the side effects of plugging
+        /// or unplugging it. For the start of a recording or a playback (Netplay.MachineInput.Begin):
+        /// the value is not machine state, so no snapshot carries it, and every run of the session
+        /// has to start from the same one.
+        /// </summary>
+        internal static void RestoreMouseConnection(bool connected)
+        {
+            lock (_syncLock)
+                MouseConnected = connected;
+        }
+
+        /// <summary>
         /// Sends a mouse packet right away, carrying any motion accumulated so far. Button
         /// changes go through <see cref="MouseButtonChanged"/>, which knows what each reporting
         /// mode owes the program; this is for anything that needs a packet out of turn.
@@ -1009,7 +1028,7 @@ namespace ASE
                 return;
             }
 
-            double sens = ConfigOptions.RunninConfig.MouseSensitivity;
+            double sens = MouseDivisorOverride > 0 ? MouseDivisorOverride : ConfigOptions.RunninConfig.MouseSensitivity;
             if (sens < 0.1) sens = 1.0;
 
             int dx = (int)(_mouseAccumX / sens);

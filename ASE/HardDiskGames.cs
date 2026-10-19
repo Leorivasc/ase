@@ -86,8 +86,8 @@ namespace ASE
 
         /// <summary>
         /// The adaptations a library folder or zip holds, by its name (the "Path" of the
-        /// catalogue; a zip without its extension), or an empty list. Usually one; a few
-        /// adaptations bundle two titles under one folder, and one is listed under two names.
+        /// catalogue; a zip without its extension), or an empty list. Usually one; a few dozen
+        /// folders are listed under two or three names — alternative titles, or a bundle.
         /// Matching the name is not enough on its own: an ordinary floppy zip may happen to be
         /// called like an adaptation, so the entry must also contain a launcher.
         /// </summary>
@@ -141,6 +141,9 @@ namespace ASE
 
         /// <summary>The image of the game the machine was powered on with, or null.</summary>
         public static string ImagePath => _attached?.ImagePath;
+
+        /// <summary>The title of the game the machine was powered on with, or null.</summary>
+        public static string Title => _attached?.Title;
 
         /// <summary>
         /// Called from ASEMain.TurnOn before the disks attach: the game chosen by then is the
@@ -449,10 +452,10 @@ namespace ASE
         /// then the disk as it stands, compressed — PPutnik's data is packed, the free space is
         /// not. A snapshot is how a hard-disk game is kept: the image file goes with the session.
         /// </summary>
-        public static void SaveState(Snapshot.Writer w, byte[] disk)
+        public static void SaveState(Snapshot.Writer w, byte[] disk, bool sourceNameOnly = false)
         {
             w.Str(_attached.Title);
-            w.Str(_attached.Source);
+            w.Str(sourceNameOnly ? Path.GetFileName(_attached.Source ?? "") : _attached.Source);
             w.U32((uint)disk.Length);
 
             using var packed = new MemoryStream();

@@ -574,10 +574,10 @@ namespace ASE
         // the blitter hands the CPU a quota of *accesses*, not of cycles, and this is the only
         // place that sees them (see Blitter.NoteCpuBusAccess). Counting before the access, not
         // after, is what keeps the write that starts a blit from being charged to the blitter.
-        public byte   CpuRead8 (uint addr)            { Blitter.NoteCpuBusAccess(); ApplyBusWait(addr); return Read8(addr); }
-        public ushort CpuRead16(uint addr)            { Blitter.NoteCpuBusAccess(); ApplyBusWait(addr); return Read16(addr); }
-        public void   CpuWrite8 (uint addr, byte v)   { Blitter.NoteCpuBusAccess(); ApplyBusWait(addr); Write8(addr, v); }
-        public void   CpuWrite16(uint addr, ushort v) { Blitter.NoteCpuBusAccess(); ApplyBusWait(addr); Write16(addr, v); }
+        public byte   CpuRead8 (uint addr)            { Blitter.NoteCpuBusAccess(addr); ApplyBusWait(addr); return Read8(addr); }
+        public ushort CpuRead16(uint addr)            { Blitter.NoteCpuBusAccess(addr); ApplyBusWait(addr); return Read16(addr); }
+        public void   CpuWrite8 (uint addr, byte v)   { Blitter.NoteCpuBusAccess(addr); ApplyBusWait(addr); Write8(addr, v); }
+        public void   CpuWrite16(uint addr, ushort v) { Blitter.NoteCpuBusAccess(addr); ApplyBusWait(addr); Write16(addr, v); }
 
         /// <summary>
         /// Reproduces the Atari ST memory-bus wait states for a single CPU bus access, by advancing
@@ -863,6 +863,11 @@ namespace ASE
                 // Any other port below MFP registers
                 if (addr < MFP68901.MFP_BASE)
                     return Ports[addr - PortsBase];
+
+                // The MFP's USART ($FFFA27-$FFFA2F), the RS-232 port: on the odd addresses like
+                // the rest of the chip
+                if ((addr & 1) != 0 && addr >= MFP68901.MFP_BASE + MfpUsart.SCR && addr <= MFP68901.MFP_BASE + MfpUsart.UDR)
+                    return MfpUsart.Read(addr - MFP68901.MFP_BASE);
 
                 // treatment for MFP registers
                 if (addr >= MFP68901.MFP_BASE && addr <= MFP68901.MFP_BASE + 0x26)
@@ -1558,6 +1563,15 @@ namespace ASE
                         ASEMain._mfp.TDDR = v;
                         if ((ASEMain._mfp.TCDCR & 0x07) == 0)
                             ASEMain._mfp.timerDCounter = (v == 0 ? 256 : v);
+                        break;
+
+                    // The USART: SCR, UCR, RSR, TSR, UDR (the RS-232 port)
+                    case MfpUsart.SCR:
+                    case MfpUsart.UCR:
+                    case MfpUsart.RSR:
+                    case MfpUsart.TSR:
+                    case MfpUsart.UDR:
+                        MfpUsart.Write(offset, v);
                         break;
                 }
 

@@ -97,6 +97,9 @@ namespace ASE
         // The one MT-32 toolbox window, or null when it is closed (see OnMt32ToolboxClick).
         MT32.Mt32Toolbox _mt32Toolbox;
 
+        // The one Online play window, or null when it is closed (see OpenNetplayWindow).
+        NetplayWindow _netplayWindow;
+
         // Key this window's geometry is stored under in windows.json (see WindowLayouts).
         const string LayoutKey = "MainWindow";
 
@@ -120,6 +123,10 @@ namespace ASE
             {
                 ApplyDriveBConnection(Config.ConfigOptions.RunninConfig.DriveBEnabled);
                 AddHandler(DragDrop.DropEvent, OnDrop);
+
+                Netplay.NetSession.EventReceived += OnNetEvent;
+                Netplay.NetSession.StateChanged += RefreshNetStatus;
+                Netplay.NetSession.Pumped += RefreshNetStatus;
             }
         }
 
@@ -214,7 +221,70 @@ namespace ASE
                     Dispatcher.UIThread.Post(() => SetFullScreen(true), DispatcherPriority.Loaded);
 
                 ShowUpdateWindowIfNeeded();
+                StartInvitationLinks();
             }
+        }
+
+        // Invitation links (NETPLAY.md §8.4). With the user's yes this ASE takes the links clicked
+        // while it runs, and keeps the ase: link type pointed at itself when it has moved; the
+        // link it was started with, if any, opens either way (it can only have come from a click
+        // the system routed here, or from --join).
+        void StartInvitationLinks()
+        {
+            var config = ConfigOptions.RunninConfig;
+
+            if (config.NetplayOpenLinks == ConfigOptions.LinkChoices.Yes && Netplay.LinkScheme.Supported)
+            {
+                ListenForInvitationLinks();
+
+                string launcher = Netplay.LinkScheme.LauncherSignature;
+                if (!Netplay.LinkScheme.IsRegistered || config.NetplayLinksLauncher != launcher)
+                {
+                    // Registering runs the system's tools (osacompile and company on macOS): off the
+                    // UI thread, and the answer the user gave once still stands
+                    Task.Run(() =>
+                    {
+                        bool ok = Netplay.LinkScheme.Register(out string error);
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            if (ok)
+                            {
+                                config.NetplayLinksLauncher = launcher;
+                                Program.Config.DumpJsonConfig();
+                                ColoredConsole.WriteLine("Online play: invitation links now open this copy of ASE", ConfigOptions.DebugModes.Quiet);
+                            }
+                            else
+                            {
+                                ColoredConsole.WriteLine($"Online play: [[yellow]]invitation links could not be pointed at this copy of ASE[[/yellow]]: {error}", ConfigOptions.DebugModes.Quiet);
+                            }
+                        });
+                    });
+                }
+            }
+
+            if (Config.StartupJoinLink is { } link)
+            {
+                Config.StartupJoinLink = null;
+                Dispatcher.UIThread.Post(() => OpenInvitationLink(link), DispatcherPriority.Loaded);
+            }
+        }
+
+        /// <summary>Takes the invitation links other ASE processes hand over (a link clicked while
+        /// this one runs). Harmless twice.</summary>
+        public void ListenForInvitationLinks() =>
+            Netplay.LinkScheme.Listen(link => Dispatcher.UIThread.Post(() => OpenInvitationLink(link)));
+
+        /// <summary>Opens the Online play window on joining over the Internet, with the link in
+        /// the box: joining is still the user's press of Join.</summary>
+        public void OpenInvitationLink(string link)
+        {
+            if (_closed)
+                return;
+
+            ColoredConsole.WriteLine("Online play: an invitation link arrived", ConfigOptions.DebugModes.Quiet);
+            OpenNetplayWindow(NetplayWindow.Modes.Join);
+            _netplayWindow?.ShowJoinLink(link);
+            _netplayWindow?.Activate();
         }
 
         /// <summary>
@@ -293,6 +363,11 @@ namespace ASE
             _closed = true;
 
             base.OnClosed(e);
+
+            // The other players get their CLOSE instead of waiting out a timeout, and the
+            // router closes the port it opened
+            Netplay.NetSession.Shutdown();
+
             ASEMain.Shutdown();
         }
 
@@ -318,7 +393,7 @@ namespace ASE
             if (ASEMain.IsMouseCaptured &&
                 (p.Properties.IsLeftButtonPressed || p.Properties.IsRightButtonPressed))
             {
-                ACIA.MouseButtonChanged(left: p.Properties.IsLeftButtonPressed, pressed: true);
+                Netplay.MachineInput.MouseButton(left: p.Properties.IsLeftButtonPressed, pressed: true);
                 e.Handled = true;
             }
         }
@@ -341,8 +416,8 @@ namespace ASE
                 (e.InitialPressMouseButton == MouseButton.Left ||
                  e.InitialPressMouseButton == MouseButton.Right))
             {
-                ACIA.MouseButtonChanged(left: e.InitialPressMouseButton == MouseButton.Left,
-                                        pressed: false);
+                Netplay.MachineInput.MouseButton(left: e.InitialPressMouseButton == MouseButton.Left,
+                                                 pressed: false);
                 e.Handled = true;
             }
         }
@@ -754,6 +829,11 @@ namespace ASE
 
         private void OnDrop(object sender, DragEventArgs e)
         {
+            e.Handled = true;
+
+            if (RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                return;
+
             bool HasValidFile = false;
 
             var files = e.DataTransfer.GetItems(DataFormat.File);
@@ -782,8 +862,6 @@ namespace ASE
 
             if(!HasValidFile)
                 SetStatusBarText($"❌ Dropped file is an invalid disk image");
-
-            e.Handled = true;
         }
 
         public void OnOpenImageClick(object sender, RoutedEventArgs e) => OpenImageInto(0);
@@ -792,6 +870,9 @@ namespace ASE
 
         async void OpenImageInto(int drive)
         {
+            if (RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                return;
+
             ASEMain.CaptureMouse(false);
 
             var (canceled, selpath) = await Dialogs.OpenFile($"Select disk image file for drive {DriveLetter(drive)}:",
@@ -804,15 +885,21 @@ namespace ASE
 
         public void OnChangeDiskClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                return;
+
             // Another disk of the same zip is still the same game, so it keeps whatever
             // library entry (and MT-32 profile) is already loaded.
             InsertDisk(0, ZipFile[0], MT32.Mt32Profiles.CurrentGame);
         }
 
-        public void OnChangeDiskBClick(object sender, RoutedEventArgs e) => InsertDisk(1, ZipFile[1], null);
+        public void OnChangeDiskBClick(object sender, RoutedEventArgs e)
+        {
+            if (!RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                InsertDisk(1, ZipFile[1], null);
+        }
 
-        /// <summary>The two floppy drives, by index: 0 = A, 1 = B.</summary>
-        static FloppyImage Drive(int drive) => drive == 1 ? ASEMain.driveB : ASEMain.driveA;
+        static FloppyImage Drive(int drive) => ASEMain.Drive(drive);
 
         static char DriveLetter(int drive) => drive == 1 ? 'B' : 'A';
 
@@ -824,15 +911,63 @@ namespace ASE
         /// </summary>
         static bool InsertIntoDrive(int drive, string imageFile, out string message)
         {
+            // A shared machine changes disk on every computer at once, at the frame this
+            // player's next input lands on: the disk is read here and travels with that frame.
+            if (Netplay.Lockstep.Active)
+                return ScheduleDisk(drive, imageFile, out message);
+
             bool inserted = false;
             string loadMessage = "";
 
-            if (!ASEMain.RunWhilePaused(() => inserted = Drive(drive).Insert(imageFile, out loadMessage),
-                                        out string error))
+            if (!ASEMain.RunWhilePaused(() =>
+                {
+                    object before = Drive(drive).MediaToken;
+                    try
+                    {
+                        inserted = Drive(drive).Insert(imageFile, out loadMessage);
+                    }
+                    finally
+                    {
+                        // A recording replays the swap at the start of the frame about to run.
+                        // Whatever changed counts, a load that failed half-way included.
+                        if (Drive(drive).MediaToken != before)
+                            Netplay.MachineInput.NoteMediaChange(drive);
+                    }
+                }, out string error))
                 loadMessage = $"Could not read [[red]]{imageFile}[[/red]]: {error}";
 
             message = loadMessage;
             return inserted;
+        }
+
+        /// <summary>
+        /// A shared game's disk swap (see InsertIntoDrive): the image is loaded into a drive of
+        /// its own, and what the drive would hold is sent to every machine as a frame command.
+        /// The same failures as an ordinary insert, a zip holding several images included.
+        /// </summary>
+        static bool ScheduleDisk(int drive, string imageFile, out string message)
+        {
+            var scratch = new FloppyImage();
+
+            try
+            {
+                if (!scratch.Insert(imageFile, out message))
+                    return false;
+
+                byte[] media = Snapshot.Pack(w => scratch.SaveMedia(w, fileNameOnly: true));
+                if (!Netplay.MachineInput.Schedule(new Netplay.FrameCommand(Netplay.CommandKind.Media, drive, media)))
+                {
+                    message = "The shared game has just ended: insert the disk again.";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                message = $"Could not read [[red]]{imageFile}[[/red]]: {ex.Message}";
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -901,27 +1036,60 @@ namespace ASE
 
                 // Answering No is a real option now: the FDC reports the disk change to the running
                 // program (see FloppyImage.SignalDiskTransition), which is what multi-disk games and
-                // GEMDOS need to pick up the new disk without rebooting.
-                var response = await Dialogs.MessageBox("Disk inserted", "Reboot?", MessageBoxDialogType.YesNo, MessageBoxIconType.Question, MessageBoxButton.Yes);
+                // GEMDOS need to pick up the new disk without rebooting. While recording it is the
+                // only one offered: a reboot would end the recording, and the swap is recorded.
+                // In a shared game the swap has not happened yet (it lands a few frames from now
+                // on every machine), so a reset now would lose it: the host resets afterwards.
+                if (!Netplay.InputRecording.IsRecording && !Netplay.Lockstep.Active)
+                {
+                    var response = await Dialogs.MessageBox("Disk inserted", "Reboot?", MessageBoxDialogType.YesNo, MessageBoxIconType.Question, MessageBoxButton.Yes);
 
-                if (response == MessageBoxButton.Yes)
-                    ASEMain.HardReset();
+                    if (response == MessageBoxButton.Yes)
+                        ASEMain.HardReset();
+                }
             }
 
             EjectDiskItem(drive).IsEnabled = true;
 
-            SetStatusBarText($"Disk {Path.GetFileName(ImageFile)} inserted in drive {DriveLetter(drive)}");
+            SetStatusBarText(Netplay.Lockstep.Active
+                ? $"Disk {Path.GetFileName(ImageFile)} goes into drive {DriveLetter(drive)} of every player's machine"
+                : $"Disk {Path.GetFileName(ImageFile)} inserted in drive {DriveLetter(drive)}");
         }
 
-        public void OnEjecImageClick(object sender, RoutedEventArgs e) => EjectFrom(0);
+        public void OnEjecImageClick(object sender, RoutedEventArgs e)
+        {
+            if (!RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                EjectFrom(0);
+        }
 
-        public void OnEjecImageBClick(object sender, RoutedEventArgs e) => EjectFrom(1);
+        public void OnEjecImageBClick(object sender, RoutedEventArgs e)
+        {
+            if (!RefusedDuringSession("Changing disks", onlyDuringPlayback: true))
+                EjectFrom(1);
+        }
 
         void EjectFrom(int drive)
         {
+            // A shared machine ejects on every computer at once, like a swap (see InsertIntoDrive)
+            if (Netplay.Lockstep.Active)
+            {
+                Netplay.MachineInput.Schedule(new Netplay.FrameCommand(Netplay.CommandKind.Media, drive,
+                    Snapshot.Pack(w => new FloppyImage().SaveMedia(w))));
+                ZipFile[drive] = "";
+                DisableEjectMenu(drive);
+                return;
+            }
+
             // Same rendezvous as inserting: the emulation thread must not be reading the image
             // while it is taken away from under it.
-            ASEMain.RunWhilePaused(Drive(drive).Eject, out _);
+            ASEMain.RunWhilePaused(() =>
+            {
+                Drive(drive).Eject();
+
+                // An eject always tells TOS the disk changed, an empty drive included, so a
+                // recording always replays it.
+                Netplay.MachineInput.NoteMediaChange(drive);
+            }, out _);
             ZipFile[drive] = "";
 
             // Empty drive A: no library game any more, so the MT-32 mapping goes with it. B: never
@@ -961,6 +1129,9 @@ namespace ASE
         /// </summary>
         public void OnConnectDriveBClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedDuringSession("Plugging drive B:"))
+                return;
+
             bool connect = !Config.ConfigOptions.RunninConfig.DriveBEnabled;
 
             // Unplugging takes the disk with it: a drive that is not there cannot be holding one.
@@ -1004,6 +1175,18 @@ namespace ASE
             // any other MIDI mode there is no front panel to open, however many library
             // games carry a YM->MT-32 mapping.
             ItemMenuMt32Toolbox.IsEnabled = _mt32Toolbox == null && Mt32ModuleWiredUp;
+
+            // One session at a time: each entry stops its own, and is out of reach while the
+            // other kind runs.
+            bool recording = Netplay.InputRecording.IsRecording;
+            bool replaying = Netplay.InputRecording.IsReplaying;
+
+            bool shared = Netplay.Lockstep.Active;
+
+            ItemMenuRecordInput.Header = recording ? "Stop recording" : "Record input";
+            ItemMenuRecordInput.IsEnabled = !replaying && !shared;
+            ItemMenuPlayRecording.Header = replaying ? "Stop playback" : "Play back recording…";
+            ItemMenuPlayRecording.IsEnabled = !recording && !shared;
         }
 
         /// <summary>Whether the machine was last powered on wired to the built-in MT-32 —
@@ -1044,8 +1227,212 @@ namespace ASE
             _mt32Toolbox.Show(this);
         }
 
+        // ==================== Online play ====================
+
+        public void OnOnlinePlayClick(object sender, RoutedEventArgs e) => OpenNetplayWindow();
+
+        /// <summary>Ends the session: stops hosting, or leaves the game joined (which goes back
+        /// to looking for games if the Online play window is open).</summary>
+        public void OnNetDisconnectClick(object sender, RoutedEventArgs e)
+        {
+            if (Netplay.NetSession.Role == Netplay.NetSession.Roles.Guest)
+                Netplay.NetSession.Leave();
+            else
+                Netplay.NetSession.Stop();
+
+            SetStatusBarText("Online play ended");
+        }
+
+        /// <summary>Names the last Online entry after the session it would end, and greys it out
+        /// when there is none — decided when the menu opens, like the Emulation menu.</summary>
+        private void OnOnlineMenuOpened(object sender, RoutedEventArgs e)
+        {
+            bool joined = Netplay.NetSession.Role == Netplay.NetSession.Roles.Guest
+                          && Netplay.NetSession.GuestState != Netplay.NetSession.GuestStates.Searching;
+
+            ItemMenuNetDisconnect.Header = Netplay.NetSession.Role == Netplay.NetSession.Roles.Host ? "Stop hosting"
+                                         : joined ? "Leave the game"
+                                         : "Disconnect";
+            ItemMenuNetDisconnect.IsEnabled = Netplay.NetSession.Role == Netplay.NetSession.Roles.Host || joined;
+        }
+
+        /// <summary>
+        /// Opens the Online play window at the role choice, or at a requested role for an
+        /// invitation or join request. An active session always opens at its lobby.
+        /// Single instance and non-modal, holding no UI pause: a session runs alongside the
+        /// machine (see NetplayWindow).
+        /// </summary>
+        void OpenNetplayWindow(NetplayWindow.Modes? mode = null)
+        {
+            if (_netplayWindow != null)
+            {
+                _netplayWindow.ShowMode(mode);
+                _netplayWindow.Activate();
+                return;
+            }
+
+            ASEMain.CaptureMouse(false);
+
+            _netplayWindow = new NetplayWindow(mode);
+            _netplayWindow.Closed += (_, _) => _netplayWindow = null;
+            _netplayWindow.Show(this);
+        }
+
+        /// <summary>What happens to a session is worth a line in the status bar; a request to
+        /// join needs an answer, so it brings the Online play window up.</summary>
+        void OnNetEvent(Netplay.NetEvent e)
+        {
+            switch (e)
+            {
+                case Netplay.JoinRequest request:
+                    SetStatusBarText(request.WithCode ? $"{request.Name} asks to join your game, with your code" : $"{request.Name} asks to join your game");
+                    if (_netplayWindow == null)
+                        OpenNetplayWindow(NetplayWindow.Modes.Host);
+                    else
+                        _netplayWindow.Activate();
+                    break;
+
+                case Netplay.PeerConnected connected:
+                    SetStatusBarText(Netplay.NetSession.Role == Netplay.NetSession.Roles.Host
+                        ? $"{connected.Name} joined your game"
+                        : $"Joined {connected.Name}'s game");
+                    break;
+
+                case Netplay.PeerLeft left when left.WasConnected:
+                    SetStatusBarText(Netplay.NetSession.Role == Netplay.NetSession.Roles.Host
+                        ? $"{left.Name} left: {left.Reason}"
+                        : $"Online play ended: {left.Reason}");
+                    break;
+            }
+        }
+
+        void RefreshNetStatus()
+        {
+            string text = Netplay.NetSession.StatusText;
+
+            PanelNetStatus.IsVisible = text != null;
+            if (text != null && TextBlockNetStatus.Text != text)
+                TextBlockNetStatus.Text = text;
+        }
+
+        /// <summary>
+        /// Starts recording the input of the running machine, or stops the recording running.
+        /// The file goes to the snapshots directory: a recording is a snapshot plus every
+        /// frame's input, and it is played back to prove the emulation repeats itself exactly
+        /// (see Netplay.InputRecording, and NETPLAY.md for what it is the groundwork of).
+        /// </summary>
+        public async void OnRecordInputClick(object sender, RoutedEventArgs e)
+        {
+            if (Netplay.InputRecording.IsRecording)
+            {
+                // The status bar gets the summary once the file is closed (OnSessionEnded)
+                Netplay.InputRecording.Stop();
+                return;
+            }
+
+            if (Netplay.InputRecording.StartRecording(out string path, out string error))
+            {
+                SetStatusBarText($"Recording input into {Path.GetFileName(path)}");
+                return;
+            }
+
+            await Dialogs.MessageBox("Record input", $"Could not start recording: {error}",
+                MessageBoxDialogType.Ok, MessageBoxIconType.Error, MessageBoxButton.Ok);
+        }
+
+        /// <summary>Plays an input recording back, checking it stays in sync, or stops the
+        /// playback running. The machine carries on live from wherever the playback ends.</summary>
+        public async void OnPlayRecordingClick(object sender, RoutedEventArgs e)
+        {
+            if (Netplay.InputRecording.IsReplaying)
+            {
+                Netplay.InputRecording.Stop();
+                return;
+            }
+
+            ASEMain.CaptureMouse(false);
+
+            var (canceled, selpath) = await Dialogs.OpenFile("Play back input recording",
+                Config.DialogStartFolder(Config.SnapshotsDir),
+                new FileFilter("ASE input recording", ["*." + Netplay.InputRecording.Extension]));
+
+            if (canceled || selpath.Count() != 1)
+                return;
+
+            string path = selpath.ElementAt(0);
+
+            if (!Netplay.InputRecording.StartReplay(path, out string error))
+            {
+                await Dialogs.MessageBox("Play back recording", $"Could not play back the recording: {error}",
+                    MessageBoxDialogType.Ok, MessageBoxIconType.Error, MessageBoxButton.Ok);
+                return;
+            }
+
+            // The recording brings its own machine: its drives, and whether B: is plugged in
+            ApplyDriveBConnection(Config.ConfigOptions.RunninConfig.DriveBEnabled);
+            RefreshDiskMenus(0);
+
+            SetStatusBarText($"Playing back {Path.GetFileName(path)}");
+        }
+
+        /// <summary>A recording or a playback ended (posted by Netplay.InputRecording, which has
+        /// already written the details to the console): report it, and put the disk menus back
+        /// in step with drives a playback may have changed.</summary>
+        public void OnSessionEnded(string summary)
+        {
+            SetStatusBarText(summary);
+            RefreshDiskMenus(0);
+            RefreshDiskMenus(1);
+        }
+
+        /// <summary>
+        /// Refuses, with a word in the status bar, what would make a running recording or
+        /// playback stop describing the machine: the configuration (it applies live), the
+        /// debugger, plugging drive B. With <paramref name="onlyDuringPlayback"/>, things a
+        /// recording logs but a playback must leave alone, since the recording supplies them —
+        /// the disks above all. True when refused.
+        /// </summary>
+        bool RefusedDuringSession(string what, bool onlyDuringPlayback = false)
+        {
+            bool replaying = Netplay.InputRecording.IsReplaying;
+            bool refused = onlyDuringPlayback ? replaying : Netplay.MachineInput.Deterministic;
+
+            if (refused)
+                SetStatusBarText(Netplay.Lockstep.Active
+                    ? $"❌ {what} is not available while playing together online: every computer runs the same machine"
+                    : $"❌ {what} is not available while {(replaying ? "a recording plays back" : "recording input")}: stop it first (Emulation menu)");
+
+            return refused;
+        }
+
+        /// <summary>
+        /// Refuses, with a word in the status bar, what would replace the machine on a guest of a
+        /// shared game: the machine is the host's, which shares a new one whenever it replaces
+        /// its own. True when refused.
+        /// </summary>
+        bool RefusedToGuest(string what)
+        {
+            if (!Netplay.Lockstep.IsGuest)
+                return false;
+
+            SetStatusBarText($"❌ {what} is the host's to do while playing on its machine");
+            return true;
+        }
+
+        /// <summary>A shared game started a machine on this computer, or gave this one its own
+        /// back: the drives and drive B come with it.</summary>
+        public void OnSharedMachineChanged()
+        {
+            ApplyDriveBConnection(Config.ConfigOptions.RunninConfig.DriveBEnabled);
+            RefreshDiskMenus(0);
+            RefreshDiskMenus(1);
+        }
+
         public async void OnResetClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedToGuest("Resetting"))
+                return;
+
             var response = await Dialogs.MessageBox("Reset ST", "Are you sure?", MessageBoxDialogType.YesNo, MessageBoxIconType.Question, MessageBoxButton.Yes);
 
             // HardReset stops the emulation thread before re-initializing: InitCpu alone would
@@ -1061,6 +1448,20 @@ namespace ASE
         /// from the File menu and from F11 (posted here by ASEMain.HandleEvents). UI thread.</summary>
         public void DoSaveSnapshot()
         {
+            // Saving completes an STX command in flight, a change the recording being played
+            // knows nothing about (while recording, it is logged and replayed instead).
+            if (RefusedDuringSession("A snapshot", onlyDuringPlayback: true))
+                return;
+
+            // In a shared game the snapshot is taken a few frames from now, where every machine
+            // completes the floppy command in flight with it (see Lockstep.ScheduleSnapshot)
+            if (Netplay.Lockstep.Active)
+            {
+                if (Netplay.Lockstep.ScheduleSnapshot(out string scheduled))
+                    SetStatusBarText($"Saving snapshot {Path.GetFileName(scheduled)}");
+                return;
+            }
+
             if (ASEMain.SaveSnapshot(out string path, out string error))
                 SetStatusBarText($"Snapshot saved: {Path.GetFileName(path)}");
             else
@@ -1077,8 +1478,43 @@ namespace ASE
                 SetStatusBarText($"❌ Could not save screenshot: {error}");
         }
 
+        /// <summary>Ctrl+Shift+F10, or a gamepad button set to go back: <paramref name="seconds"/>
+        /// back in the game (TimeWarp.StepBack).</summary>
+        public void DoTimeWarpStep(int seconds = TimeWarp.StepSeconds)
+        {
+            int went = TimeWarp.StepBack(seconds, out string error);
+            SetStatusBarText(went >= 0 ? $"Time warp: back {went} s" : $"Time warp: {error}");
+        }
+
+        public void OnTimeWarpClick(object sender, RoutedEventArgs e) => OpenTimeWarp();
+
+        /// <summary>
+        /// Opens the time warp: the last minute of play as a strip of pictures, to pick the moment
+        /// the game carries on from. From the menu, Ctrl+Shift+F10 or a gamepad button; once at a
+        /// time. It opens whatever the time warp can do right now — its switch is in it, and it
+        /// says why there is nothing to pick when there is not. Holds a UI pause like the
+        /// emulator's dialogs, and gives input capture back when it closes if it had it: whoever
+        /// opened it from the keys or the pad is still playing.
+        /// </summary>
+        public async void OpenTimeWarp()
+        {
+            if (TimeWarpWindow.Current != null)
+                return;
+
+            bool captured = ASEMain.IsMouseCaptured;
+            ASEMain.CaptureMouse(false);
+
+            await new TimeWarpWindow().ShowDialog(this);
+
+            if (captured)
+                ASEMain.CaptureMouse(true);
+        }
+
         public async void OnRestoreSnapshotClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedToGuest("Restoring a snapshot"))
+                return;
+
             ASEMain.CaptureMouse(false);
 
             var (canceled, selpath) = await Dialogs.OpenFile("Restore ST snapshot",
@@ -1107,6 +1543,9 @@ namespace ASE
 
         private async void OnLibraryClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedDuringSession("The library", onlyDuringPlayback: true))
+                return;
+
             ASEMain.CaptureMouse(false);
 
             var library = new LibraryWindow();
@@ -1128,6 +1567,9 @@ namespace ASE
         /// </summary>
         async void LaunchHardDiskGame(string source, Models.LibraryItem game)
         {
+            if (RefusedToGuest("Starting a hard-disk game"))
+                return;
+
             string title = LibraryWindow.GameEntry.DisplayName(game);
 
             if (!HardDiskGames.Start(source, title, out string error, out string warning))
@@ -1161,12 +1603,28 @@ namespace ASE
         
         public void OnConfigurationClick(object sender, RoutedEventArgs e)
         {
+            // Playing together online, the Input tab is still this player's own: which device
+            // goes into each port reaches the shared machine as ordinary input. The rest belongs
+            // to the shared machine.
+            if (Netplay.Lockstep.Active)
+            {
+                new ConfigurationWindow(inputOnly: true).ShowDialog(this);
+                return;
+            }
+
+            // Its settings apply live, and most of them change how the machine runs.
+            if (RefusedDuringSession("The configuration"))
+                return;
+
             var configWindow = new ConfigurationWindow();
             configWindow.ShowDialog(this);
         }
 
         public void OnDebugClick(object sender, RoutedEventArgs e)
         {
+            if (RefusedDuringSession("The debugger"))
+                return;
+
             var debugWindow = new DebugWindow();
             debugWindow.ShowDialog(this);
         }

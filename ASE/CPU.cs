@@ -143,6 +143,25 @@ namespace ASE
             if (ASEMain._mem.ROM == null)
                 return false;
 
+            // A power-on forgets the controls held on the host: their releases never reach the
+            // new machine
+            HostInput.Reset();
+
+            ResetChips();
+            return true;
+        }
+
+        /// <summary>
+        /// A fresh 68000 and freshly reset chips around the memory that is already there: the
+        /// second half of a power-on, and how the time warp (<see cref="TimeWarp"/>) gets a clean
+        /// machine to put a moment back on, without reloading the TOS, re-attaching disks or
+        /// power-cycling the MIDI module. Only the CPU is new: its internal state (STOP, a halt,
+        /// a fault in progress) is not in a snapshot, so applying one over the old core would keep
+        /// it. Same calling rules as <see cref="InitCpu"/>, or with the emulation parked at a frame
+        /// boundary.
+        /// </summary>
+        public static void ResetChips()
+        {
             // Wire the CPU bus through the timing wrappers (CpuRead*/CpuWrite*) so the ST memory
             // wait states are applied once per bus cycle. They fall through to the raw Read*/Write*
             // accessors, which the rest of the emulator keeps using directly (no wait states).
@@ -162,9 +181,9 @@ namespace ASE
 
             ASEMain._mfp = new MFP68901();
 
-            HostInput.Reset();
             ACIA.Reset();
             MidiAcia.Reset();
+            MfpUsart.Reset();
             WD1772.Reset();
             Blitter.Reset();
             STEDmaSound.Reset();
@@ -182,8 +201,6 @@ namespace ASE
             // they are needed.
             foreach (uint bp in _userBreakpoints)
                 _moira.SetBreakpoint(bp);
-
-            return true;
         }
     }
 }

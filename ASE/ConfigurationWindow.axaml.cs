@@ -18,6 +18,9 @@ namespace ASE
         Config.ConfigOptions configBackup;
         bool ForceReset = false;
 
+        // Playing together online: only the Input tab (see the constructor)
+        readonly bool _inputOnly;
+
         // The model ComboBox raises Model_SelectionChanged while its binding is first
         // resolved (DataContext assignment in the constructor); the ROM/model guard must
         // not fire until the user actually interacts with the window.
@@ -38,9 +41,20 @@ namespace ASE
         bool _crtLayoutReady;
         readonly TranslateTransform _crtRevealTranslate = new();
 
-        public ConfigurationWindow()
+        // Avalonia's runtime XAML loader (and the designer) look for a parameterless constructor.
+        public ConfigurationWindow() : this(inputOnly: false) { }
+
+        /// <param name="inputOnly">
+        /// While playing together online (Netplay.Lockstep): only the Input tab can be used. Its
+        /// settings are this computer's alone — what goes into each port reaches the shared
+        /// machine as ordinary input, through the session like any key, and each player keeps
+        /// their own mouse sensitivity — while everything in the other tabs belongs to the
+        /// shared machine, or would change it.
+        /// </param>
+        public ConfigurationWindow(bool inputOnly)
         {
             InitializeComponent();
+            _inputOnly = inputOnly;
 
             configBackup = new Config.ConfigOptions
             {
@@ -153,6 +167,15 @@ namespace ASE
 
             _lastValidModelIndex = (int)Config.ConfigOptions.RunninConfig.STModel;
             _uiReady = true;
+
+            if (inputOnly)
+            {
+                foreach (var tab in Tabs.Items.OfType<TabItem>())
+                    tab.IsEnabled = tab == TabInput;
+
+                Tabs.SelectedItem = TabInput;
+                TextHeaderDescription.Text = "Playing together online: only your input can change here. Everything else belongs to the shared machine.";
+            }
         }
 
         // The emulator parks (and stops receiving host input) while the window is open
@@ -290,6 +313,17 @@ namespace ASE
 
         public void OnOkClick(object sender, RoutedEventArgs e)
         {
+            // Only the Input tab was open: nothing else to check or apply, and no reset. The TOS
+            // checks below would not even be fair here — on a guest the model is the host's,
+            // borrowed, while the TOS path is still this computer's own.
+            if (_inputOnly)
+            {
+                CommitInput();
+                Program.Config.DumpJsonConfig();
+                Close();
+                return;
+            }
+
             // TOS path cannot be empty
             if (string.IsNullOrEmpty(Config.ConfigOptions.RunninConfig.TOSPath))
             {
@@ -355,20 +389,7 @@ namespace ASE
                     return;
             }
 
-            // Save gamepad buttons
-            Config.ConfigOptions.RunninConfig.GamepadButtonX = (Config.ConfigOptions.GamepadButtonsMapping)ComboX.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonY = (Config.ConfigOptions.GamepadButtonsMapping)ComboY.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonA = (Config.ConfigOptions.GamepadButtonsMapping)ComboA.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonB = (Config.ConfigOptions.GamepadButtonsMapping)ComboB.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonLS = (Config.ConfigOptions.GamepadButtonsMapping)ComboLS.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonRS = (Config.ConfigOptions.GamepadButtonsMapping)ComboRS.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonLB = (Config.ConfigOptions.GamepadButtonsMapping)ComboLB.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.GamepadButtonRB = (Config.ConfigOptions.GamepadButtonsMapping)ComboRB.SelectedIndex;
-
-            // Save the joystick ports. No reset: the emulation thread plugs the devices in on
-            // its next event drain (HostInput.ApplyPortConfiguration).
-            Config.ConfigOptions.RunninConfig.Port0Device = (Config.ConfigOptions.PortDevices)ComboPort0.SelectedIndex;
-            Config.ConfigOptions.RunninConfig.Port1Device = (Config.ConfigOptions.PortDevices)ComboPort1.SelectedIndex;
+            CommitInput();
 
             // Save the hard disks (validated above)
             Config.ConfigOptions.RunninConfig.GemdosDriveEnabled = gemdosOn;
@@ -396,6 +417,10 @@ namespace ASE
             Config.ConfigOptions.RunninConfig.MidiInDevice = SelectedMidiPort(ComboMidiIn);
             Config.ConfigOptions.RunninConfig.MidiOutDevice = SelectedMidiPort(ComboMidiOut);
 
+            // What the dialog showed is the user's choice now, a machine borrowed from a shared
+            // game included (see Netplay.Lockstep)
+            Netplay.Lockstep.ForgetUserMachine();
+
             Program.Config.DumpJsonConfig();
 
             if (ForceReset)
@@ -407,6 +432,26 @@ namespace ASE
             }
 
             Close();
+        }
+
+        /// <summary>The Input tab's settings that are edited locally and committed on OK: the
+        /// gamepad buttons and the joystick ports. The key bindings and the mouse speed apply as
+        /// they are edited.</summary>
+        void CommitInput()
+        {
+            Config.ConfigOptions.RunninConfig.GamepadButtonX = (Config.ConfigOptions.GamepadButtonsMapping)ComboX.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonY = (Config.ConfigOptions.GamepadButtonsMapping)ComboY.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonA = (Config.ConfigOptions.GamepadButtonsMapping)ComboA.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonB = (Config.ConfigOptions.GamepadButtonsMapping)ComboB.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonLS = (Config.ConfigOptions.GamepadButtonsMapping)ComboLS.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonRS = (Config.ConfigOptions.GamepadButtonsMapping)ComboRS.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonLB = (Config.ConfigOptions.GamepadButtonsMapping)ComboLB.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.GamepadButtonRB = (Config.ConfigOptions.GamepadButtonsMapping)ComboRB.SelectedIndex;
+
+            // Save the joystick ports. No reset: the emulation thread plugs the devices in on
+            // its next event drain (HostInput.ApplyPortConfiguration).
+            Config.ConfigOptions.RunninConfig.Port0Device = (Config.ConfigOptions.PortDevices)ComboPort0.SelectedIndex;
+            Config.ConfigOptions.RunninConfig.Port1Device = (Config.ConfigOptions.PortDevices)ComboPort1.SelectedIndex;
         }
 
         void CompleteRedefine()

@@ -166,6 +166,10 @@ namespace ASE
         // now that it is stepped.
         static bool nfsrState;
         static bool haveFxsr;
+
+        // The last word the blitter moved over the bus, read (source or destination) or written:
+        // what the extra shift-and-fetch of an NFSR line's last word takes in (Hatari's bus_word).
+        // Not per blit -- only a reset clears it.
         static ushort lastBusWord;
 
         /// <summary>
@@ -203,7 +207,7 @@ namespace ASE
         /// </para>
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void NoteCpuBusAccess()
+        public static void NoteCpuBusAccess(uint addr)
         {
             // The blitter held the bus until busFreeAt: an access before that waits for it, like
             // any other wait state. This is the only thing a burst costs the 68000 -- the cycles
@@ -245,6 +249,16 @@ namespace ASE
             // simply would not happen yet; here it already has, so it is booked and paid for
             // when the burst ends (see ReleaseBus).
             if (earlyCpuAccesses++ == 0) earlyAccessClock = CPU._moira.Clock;
+
+            // Booking the time is enough for an access to RAM the blit does not touch, but not
+            // for one to the blitter itself: a register written now would change the blit before
+            // it has run. The restart idiom does exactly that — `move.w d1,(a2)` (y count) then
+            // `move.b d6,(a6)` (busy + HOG), over and over, Lotus Esprit Turbo Challenge's sprite
+            // routine for one — and the y count meant for the next chunk was consumed by the one
+            // still waiting, so every plane lost its last chunk. The access waits for the bus
+            // here, as on the machine: the burst runs first (the whole blit, in HOG mode).
+            if ((addr & 0xFFFFC0) == BASE)
+                Run(long.MaxValue);
         }
 
         public static void Reset()
@@ -625,8 +639,8 @@ namespace ASE
         /// <para>
         /// While the whole blit ran inside the register write this was invisible: busy was
         /// already clear by the time the loop first looked. Now that the blit is stepped,
-        /// calling <see cref="StartBlit"/> there reset <see cref="nfsrState"/>,
-        /// <see cref="haveFxsr"/> and <see cref="lastBusWord"/> in the middle of a line — and an
+        /// calling <see cref="StartBlit"/> there reset <see cref="nfsrState"/> and
+        /// <see cref="haveFxsr"/> in the middle of a line — and an
         /// NFSR blit whose state was cleared between xCount 2 and 1 then made the source read it
         /// was meant to skip, so srcAddr advanced one word too far and every line after it was
         /// fetched from the wrong place. That is what shredded the GEM menus and the Atari logo.
@@ -666,7 +680,6 @@ namespace ASE
 
             nfsrState = false;
             haveFxsr = false;
-            lastBusWord = 0;
         }
 
         /// <summary>A blit is in progress (the busy bit of $FF8A3C is set).</summary>
@@ -895,7 +908,8 @@ namespace ASE
         ///  - need_dst determines whether destination is read (forced true when mask != 0xFFFF)
         ///  - NFSR state is reset at start of each line, set when xCount reaches 2
         ///  - FXSR flag is latched per-line at the first word
-        ///  - Special weird case: xCount=1 + NFSR does SourceShift+Fetch(busWord) before and after write
+        ///  - Special weird case: xCount=1 + NFSR does SourceShift+Fetch(busWord) before and after write,
+        ///    busWord being the last word on the bus (source read, destination read or write)
         ///  - Barrel shifter direction depends on sign of srcXInc
         ///  - For single-word lines, only endmask1 is used
         /// </summary>
@@ -967,6 +981,7 @@ namespace ASE
                 {
                     BusAccess();
                     dstWord = mem.Read16(dstAddr);
+                    lastBusWord = dstWord;
                 }
 
                 // Special 'weird' case for xCount=1 and NFSR=1 (per Hatari)
@@ -1006,6 +1021,7 @@ namespace ASE
 
                 BusAccess();
                 mem.Write16(dstAddr, finalResult);
+                lastBusWord = finalResult;
 
                 // Special 'weird' case for xCount=1 and NFSR=1 — after write
                 if (nfsr && xCount == 1)

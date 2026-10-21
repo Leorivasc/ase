@@ -1,81 +1,121 @@
+<p align="center">
+  <img src="Images/logo.png" alt="Atari System Emulator" width="516">
+</p>
 
-# ASE = Atari System Emulator
+<p align="center">
+  An Atari ST emulator for playing, exploring, and reimagining your favourite ST games.
+</p>
 
-![Logo.](Images/logo.png "Logo.")
+<p align="center">
+  <a href="https://github.com/thebitculture/ase/releases">Download</a> ·
+  <a href="https://github.com/thebitculture/ase/wiki">Wiki</a> ·
+  <a href="#building-from-source">Build from source</a>
+</p>
 
-**Atari System Emulator** or **ASE** is an **Atari ST** emulator that emulates the **ST F/FM**, the **Mega ST** and the **STE**. It is written in C# and utilizes the great **Motorola 68000 Moira** emulator created by **Dr. Dirk Hoffmann**.
+ASE emulates the Atari ST F/FM, Mega ST, and STE. It's written in C# and uses [Moira](https://github.com/dirkwhoffmann/Moira), Dr. Dirk Hoffmann's Motorola 68000 emulator. You can run ST software as it was, or use a few conveniences that weren't around on the original machines.
 
-ASE is designed to deliver a fresh Atari ST emulation experience, allowing you to enhance your favorite ST games and applications beyond the capabilities of the original hardware, without requiring any modifications to the software itself.
+<p align="center">
+  <img src="Images/ASE.png" alt="ASE running Rainbow Islands" width="804"><br>
+  <sub>Rainbow Islands running in ASE.</sub>
+</p>
 
-ASE makes it easier than ever to rediscover the games you grew up playing, with support for **cover art, videos, and screenshots** to bring your collection to life.
+## Playing and browsing
 
-It also features a **save state system**, allowing you to pick up exactly where you left off at any time.
+The library gives your games and applications a place to live beyond a list of filenames. You can browse cover art and see each game's metadata, screenshots, and video previews.
 
-📖 **[Check out the Wiki](https://github.com/thebitculture/ase/wiki)** to explore all the features ASE has to offer!
+<p align="center">
+  <img src="Images/library.png" alt="ASE library showing game cover art" width="800"><br>
+  <sub>Browse the collection by its cover art.</sub>
+</p>
 
-This emulator has its roots in an old project I started developing in C and assembly language back in the late 1990s. However, the current version is a mix of old and new code. Most of it has been rewritten from scratch, while some parts have been adapted from **Hatari** and the **MiSTer Atari ST core**.
+Save states let you stop and come back later. **Time warp** keeps a short history of play, so you can go back to a moment before a missed jump and carry on from there.
 
-The original idea behind ASE was to create an educational project that would help people understand how emulators actually work. I explore this topic on my YouTube channel, ***The Bit Culture***, where I walk through the fundamentals of emulation and share insights into the development process.
+<p align="center">
+  <img src="Images/timewarp.png" alt="Time warp window showing recent moments of play" width="764"><br>
+  <sub>Pick a moment from the last 60 seconds of play.</sub>
+</p>
 
-If you're curious about what goes on behind the scenes of an emulator, I invite you to check out the video and follow the project's progress.
+## Playing together
 
-And there's more to the channel than just emulators! We also explore retro hardware, classic games, and the fascinating world of vintage computing.
+Online play lets you share one running game over a local network or the internet. For games that used two STs, ASE can also connect their emulated MIDI or null modem ports. This part is still in preview, so expect a few rough edges.
 
-👉 https://youtube.com/@thebitculture?si=2s4M5Iu4QbIdq_hn
+<p align="center">
+  <img src="Images/netplay.png" alt="Online play connection options" width="644"><br>
+  <sub>Share a game, or link two emulated STs by MIDI or null modem.</sub>
+</p>
 
+## Sound and MIDI
 
-## Minimum Requirements
+MIDI can go to your system's MIDI ports or to the built-in MT-32 emulation, powered by [Munt](https://github.com/munt/munt). The MT-32 Toolbox also lets you assign an MT-32 instrument to each of the Atari ST's three Yamaha YM2149 sound channels. You can save those choices for a game and hear its original sound voices played with different instruments.
 
-It runs on **Windows**, **Mac**, and should also work on **Linux**, although I haven't tested it. **ASE** will work with any **TOS** version from 1.00 to 1.04 on the ST/Mega models, and from 1.06 to 2.06 on the STE.
+<p align="center">
+  <img src="Images/mt32toolbox.png" alt="MT-32 Toolbox with instrument choices for the three YM sound channels" width="399"><br>
+  <sub>Map each YM voice to an MT-32 instrument.</sub>
+</p>
 
-## Downloads
+## Looking under the hood
 
-You can download the latest release ready for use from the **[releases page](https://github.com/thebitculture/ase/releases/)**, or better yet, you can download the source code to compile and experiment yourself. To compile the source code, you will need to download **Moira** from **Dr. Dirk Hoffmann's** repository and copy only the 68k emulator into that directory, excluding the `MoiraConfig.h` configuration file. In the **ASE** **Moira** directory, you will find `Moira_dotnet.cpp` and `Moira_dotnet.h`, which are responsible for exposing Moira to the C# wrapper, as well as the files to compile **Moira** (`build.cmd` and `build.sh`), depending on the OS you use.
+The built-in debugger lets you inspect the CPU and memory. Its bitmap explorer reads graphics straight from emulated RAM, which is handy when you want to see how a game puts an image together.
 
-To compile **Moira** on **Windows**, you will need to have `cmake.exe` in your system path or open a **Visual Studio** developer console.
+<p align="center">
+  <img src="Images/bitmapexplorer.png" alt="Bitmap explorer showing graphics in emulated memory" width="800"><br>
+  <sub>Graphics in memory, viewed with the machine's current palette.</sub>
+</p>
 
-### Native libraries layout
+The [wiki](https://github.com/thebitculture/ase/wiki) has more detail on the emulator and its features.
 
-The native libraries live under `ASE/native/`, organized **per .NET RID** (operating system + architecture). When publishing, `ASE.csproj` copies **only** the library matching the target RID next to the executable:
+## Getting started
 
+Download a ready-to-run build from the [releases page](https://github.com/thebitculture/ase/releases/). ASE runs on Windows and macOS. Linux builds are available, although I haven't tested Linux myself.
+
+ASE includes [EmuTOS 1.4](https://emutos.sourceforge.io), so it can boot without a TOS ROM of your own. For the best compatibility, use a TOS image dumped from your own machine: versions 1.00–1.04 for ST/Mega ST, or 1.06–2.06 for STE.
+
+MT-32 ROM images aren't included; you'll need to provide those yourself if you want to use the built-in MT-32 emulation or the Toolbox.
+
+## Building from source
+
+You'll need the .NET 10 SDK, CMake, and a C++ compiler with C++20 support. The ASE repository includes the Moira configuration and C# wrapper, but you'll need to get the Moira emulator source separately:
+
+1. Download or clone [Dr. Dirk Hoffmann's Moira repository](https://github.com/dirkwhoffmann/Moira) somewhere outside the ASE checkout.
+2. Copy the contents of its `Moira/` subfolder into ASE's `Moira/` folder. **Keep ASE's `MoiraConfig.h`; do not overwrite it with the upstream file.** Leave ASE's `Moira_dotnet.cpp`, `Moira_dotnet.h`, `CMakeLists.txt`, and build scripts in place too.
+3. Build the native Moira library for your machine. On Windows, run this from a Visual Studio Developer Command Prompt with CMake available:
+
+   ```bat
+   cd Moira
+   build.cmd
+   cd ..
+   ```
+
+   On macOS or Linux, use:
+
+   ```sh
+   cd Moira
+   ./build.sh
+   cd ..
+   ```
+
+The scripts put the resulting library in the matching `ASE/native/<rid>/` folder. If you're building for another platform or architecture, pass its RID to `build.sh` (for example, `./build.sh linux-arm64`) or use `build.cmd ARM64` on Windows. Cross-compiling also requires the appropriate toolchain.
+
+With Moira built, run this from the ASE repository root:
+
+```sh
+dotnet build ASE/ASE.csproj
 ```
-ASE/native/
-  win-x64/      moira.dll, SDL2.dll, mt32emu-2.dll
-  osx-x64/      moira.dylib, libSDL2.dylib, libmt32emu.2.dylib
-  osx-arm64/    moira.dylib, libSDL2.dylib, libmt32emu.2.dylib
-  linux-x64/    moira.so, libmt32emu.so.2
-  linux-arm64/  moira.so, libmt32emu.so.2, libtinyfiledialogs.so
+
+To publish, use the same RID as the Moira library you built. For example:
+
+```sh
+dotnet publish ASE/ASE.csproj -c Release -r linux-arm64 --self-contained
 ```
 
-`SDL2` is bundled only on Windows and macOS; on **Linux** the distribution's own SDL2 is used. `libmt32emu` (see below) is committed **already compiled** for every RID, so it never has to be built as part of ASE. The build scripts place the compiled **Moira** library straight into the matching `native/<rid>/` folder:
+The other native libraries, including Munt's `libmt32emu`, are already provided under `ASE/native/`. SDL2 is bundled on Windows and macOS; on Linux, install it through your distribution.
 
-- `build.cmd` / `build.sh` with no argument build for the current machine.
-- To target another platform, pass its RID: `./build.sh osx-x64`, `./build.sh linux-arm64`, or `build.cmd ARM64` (cross-compiling requires the corresponding toolchain). See `ASE/native/README.md` for details.
+## About the project
 
-Then publish for that RID, e.g. `dotnet publish -c Release -r linux-arm64 --self-contained`.
+I started an earlier version of ASE in C and assembly language in the late 1990s. The current emulator mixes ideas from that project with mostly new code, plus some work adapted from Hatari and the MiSTer Atari ST core.
 
-### Roland MT-32 emulation
+ASE began as a way to learn how emulators work and share what I found. I talk through that process, along with retro hardware and games, on [The Bit Culture](https://youtube.com/@thebitculture) YouTube channel.
 
-The **Roland MT-32** (and its CM-32L / LAPC-I relatives) is the module a good number of Atari ST games and demos were composed for, through the MIDI ports every ST shipped with. ASE emulates the ST's MIDI interface and can either bridge it to the host's real MIDI ports (*System managed MIDI*) or play it through a built-in MT-32, whose synthesis comes from **Munt**'s `libmt32emu`:
+Thanks to the people behind [Moira](https://github.com/dirkwhoffmann/Moira), [Munt](https://github.com/munt/munt), and [EmuTOS](https://emutos.sourceforge.io). EmuTOS ships with its own [licence](ASE/emutos-license.txt) and [source information](ASE/emutos.txt); Munt's `libmt32emu` is distributed under LGPL 2.1 or later.
 
-👉 https://github.com/munt/munt
-
-You don’t need to build this library; the binary is already included in this repository. However, if you still want to build it yourself, take a look at `ASE/native/README.md`.
-
-`libmt32emu` is distributed under the **LGPL v2.1 or later**. The **MT-32 ROM images are not included**: just like TOS, they are copyrighted (by Roland) and have to be supplied by the user.
-
-### EmuTOS
-
-ASE ships with **EmuTOS** 1.4 (`ASE/emutos.rom`, the 256 KB image in English), the free replacement for TOS written by the EmuTOS development team, so the emulator boots out of the box without a ROM of your own. EmuTOS is distributed under the **GNU GPL**: its licence text and the link to its source code travel next to it (`emutos-license.txt`, `emutos.txt`). For the best compatibility use an original TOS dumped from your own machine.
-
-👉 ASE Releases: https://github.com/thebitculture/ase/releases/
-
-👉 Moira Releases: https://github.com/dirkwhoffmann/Moira/releases
-
-👉 Munt (libmt32emu): https://github.com/munt/munt
-
-👉 EmuTOS: https://emutos.sourceforge.io
-
----
-
-(C) _The Bit Culture_ - Public License Version 3
+ASE is © The Bit Culture and licensed under the [GNU GPL v3](LICENSE).
